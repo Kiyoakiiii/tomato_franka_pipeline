@@ -14,6 +14,7 @@ left). Each round:
    gripper cannot feel whether it holds the plant: only the picture tells).
 
 touch experiments/grasp/STOP to stop after the current step (the running cycle stops at its next step).
+With --pause it waits for a key before the first move to the overview and before each plant (space: go on, q: stop).
 
     .venvs/pipeline/bin/python scripts/72_transplant_all.py --dry-run     # plans only, from the saved files
     .venvs/pipeline/bin/python scripts/72_transplant_all.py
@@ -41,8 +42,12 @@ def main() -> int:
     ap.add_argument("--scrap-depth-mm", type=float, default=30.0)
     ap.add_argument("--skip", default="", help="comma list of cells not to take (e.g. a plant just missed)")
     ap.add_argument("--dry-run", action="store_true", help="no motion, no picture: plan the sequence from the saved tray/disc files")
+    ap.add_argument("--pause", action="store_true", help="wait for space (go on) or q (stop) before the first move and before each plant")
     args = ap.parse_args()
     cfg = config_from_args(args)
+    if args.pause and not sys.stdin.isatty():
+        print("--pause needs a terminal (keys are read from it)")
+        return 1
 
     py = sys.executable
     grasp_dir = PROJECT_DIR / "experiments" / "grasp"
@@ -59,6 +64,28 @@ def main() -> int:
             return r.returncode, r.stdout + r.stderr
         r = subprocess.run([py, "-u", *cmd], cwd=PROJECT_DIR)
         return r.returncode, ""
+
+    def go_on(what):  # --pause: space goes on, q stops; keys pressed earlier are dropped
+        if not args.pause:
+            return True
+        import termios
+        import tty
+
+        print(f"=== 下一步: {what}   [空格 继续 / q 停止]", flush=True)
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            termios.tcflush(fd, termios.TCIFLUSH)
+            while True:
+                c = sys.stdin.read(1)
+                if c == " ":
+                    return True
+                if c in "qQ":
+                    print("stopped (q)")
+                    return False
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
     def load():
         grid = json.loads((PROJECT_DIR / cfg["tray"]["grid_file"]).read_text())
@@ -84,6 +111,8 @@ def main() -> int:
             print("STOPPED on request")
             break
         if not args.dry_run:
+            if prev is None and not go_on("回总览位，拍照定位托盘和圆盘"):
+                break
             print(">>> overview and locate", flush=True)
             if run(["scripts/68_goto_overview.py"])[0] != 0:
                 print("cannot go to the overview pose: stopped")
@@ -140,13 +169,13 @@ def main() -> int:
                 continue
             hole = json.loads((grasp_dir / f"{k}_place_plan.json").read_text())["hole"]
             head = [ln for ln in og.splitlines() if "heading" in ln and "from straight out" in ln]
-            chosen = (k, hole)
-            print(f"  {k}: grasp {head[0].strip().rstrip(':') if head else ''}, into H{hole}")
+            chosen = (k, hole, head[0].strip().rstrip(":") if head else "")
+            print(f"  {k}: grasp {chosen[2]}, into H{hole}")
             break
         if chosen is None:
             print("no plant left that can be grasped and placed safely: stopped")
             break
-        k, hole = chosen
+        k, hole, head = chosen
         log["rounds"].append({"cell": k, "hole": hole, "free_before": free})
         log_file.write_text(json.dumps(log, indent=1))
         if args.dry_run:
@@ -159,6 +188,8 @@ def main() -> int:
             continue
         if stop.exists():
             print("STOPPED on request")
+            break
+        if not go_on(f"夹取 {k}，放进 H{hole}（{head}）"):
             break
         print(f">>> transplant {k} -> H{hole}", flush=True)
         rc, _ = run(["scripts/69_pick_cycle.py", "--cell", k, "--lift-mm", str(args.lift_mm), "--place", str(hole)])
