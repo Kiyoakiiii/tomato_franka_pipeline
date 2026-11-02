@@ -1,0 +1,30 @@
+{
+  "purpose": "bounded development model selection; not independent testing",
+  "authorization": "2026-10-01 user permits up to 80% CPU and GPU during currently idle laboratory period",
+  "dataset": "data/curated/seedlings_dev_v3/data.yaml",
+  "labels": "Existing v3 annotations frozen for this comparison; no prediction-based relabeling",
+  "models_first_round": ["yolo11n-seg.pt", "yolo26n-seg.pt"],
+  "initialization": "official generic COCO pretrained weights; never legacy tomato weights",
+  "common_training": {
+    "imgsz": 960, "batch": 8, "nbs": 16,
+    "epochs": 160, "patience": 40, "minutes_limit_per_run": 60,
+    "optimizer": "AdamW", "lr0": 0.001, "lrf": 0.05,
+    "warmup_epochs": 3, "warmup_bias_lr": 0, "seed": 42,
+    "mask_ratio": 2, "mosaic": 0, "resource_profile": "shared80"
+  },
+  "selection": {
+    "checkpoint": "Ultralytics best.pt by its built-in development fitness",
+    "fixed_primary_confidence": 0.25,
+    "primary_metric": "mean highest-confidence native-resolution mask IoU including no-detection frames as zero",
+    "secondary_metrics": ["no detection frames", "frames with selected mask IoU >= 0.5", "per-capture-group results", "mask mAP50-95"],
+    "threshold_diagnostics": [0.05, 0.1, 0.25, 0.4, 0.5],
+    "optional_followup": "At most one larger small-size model using the leading family's common recipe; record as adaptive development selection"
+  },
+  "limits": [
+    "Time groups are not verified plant identities; same-plant leakage may remain",
+    "One random seed is a development comparison, not a definitive architecture ranking",
+    "Legacy model may have trained on current validation images",
+    "No novel plant dataset is available; no claim of independent generalization",
+    "No camera or robot session is authorized by this training instruction"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "purpose": "At most one adaptive capacity follow-up after the two nano models",
+  "trigger": "Best fresh nano has lower mean mask IoU, more no-output frames, or fewer IoU>=0.5 frames than the legacy diagnostic",
+  "family_selection": "Fresh nano with highest mean selected-mask IoU at fixed 960 / 0.25",
+  "change": "n to s model; physical batch 8 to 4 for memory; keep nominal batch nbs=16",
+  "common": {"epochs": 160, "minutes": 60, "patience": 40, "imgsz": 960, "optimizer": "AdamW", "lr0": 0.001, "lrf": 0.05, "seed": 42},
+  "initialization": "Official generic COCO pretrained weights; no legacy tomato checkpoint",
+  "report": "Include all attempted models and failed/missed frames; native IoU is the main development metric",
+  "limitations": ["Adaptive development selection, not independent testing", "Different physical batch and model capacity; not an isolated causal architecture comparison", "Legacy training overlap is unknown"]
+}

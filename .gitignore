@@ -1,0 +1,19 @@
+# environment and caches
+.venvs/
+.config/
+.cache/
+.tmp/
+.pytest_cache/
+__pycache__/
+*.pyc
+
+# data, model weights, experiment outputs (large; not code)
+data/
+models/
+experiments/
+calibration/sessions/
+archive/legacy_v0/captures/
+*.npz
+*.png
+*.jpg
+*.pt

@@ -1,0 +1,111 @@
+from __future__ import annotations
+
+import copy
+import json
+from pathlib import Path
+from typing import Any
+
+from .paths import PROJECT_DIR, resolve_project_path
+
+
+DEFAULT_CONFIG: dict[str, Any] = {
+    "robot": {
+        "host": "192.168.137.2",
+        "relative_dynamics_factor": 0.04,
+        "rest_position_m": [0.50, 0.00, 0.40],
+        "orientation_euler_xyz_deg": [180.0, 0.0, 90.0],
+        "end_effector": "none",
+        "use_franka_gripper": False,
+        "workspace_limits_m": {
+            "x": [0.30, 0.75],
+            "y": [-0.35, 0.35],
+            "z": [0.08, 0.60],
+        },
+        "gripper": {
+            "open_width_m": 0.055,
+            "close_width_m": 0.008,
+            "speed_m_s": 0.02,
+            "force_n": 15.0,
+        },
+        "serial_gripper": {
+            "port": "/dev/ttyUSB0",
+            "baudrate": 115200,
+            "open_command": "G0",
+            "close_command": "G70",
+            "settle_s": 0.5,
+        },
+    },
+    "camera": {
+        "source": "zed",
+        "webcam_id": 0,
+        "zed_resolution": "HD1080",
+        "zed_fps": 30,
+        "zed_depth_mode": "NEURAL",
+        "target_depth_min_mm": 400.0,
+        "target_depth_max_mm": 600.0,
+    },
+    "vision": {
+        "model_path": "models/stem_yolo11n_v3_clean_one_stem.pt",
+        "confidence": 0.25,
+        "image_size": 960,
+        "max_detections": 6,
+        "grasp_height_percentile": 72.0,
+        "min_mask_area_px": 60,
+    },
+    "localization": {
+        "mode": "manual_scale",
+        "calibration_file": "calibration/planar_pixel_to_robot.json",
+        "workspace_center_pixel": [960.0, 540.0],
+        "workspace_center_robot_xy_m": [0.50, 0.00],
+        "meters_per_pixel_x": 0.00047,
+        "meters_per_pixel_y": 0.00047,
+        "image_y_positive_to_robot_y_sign": -1.0,
+        "fixed_grasp_z_m": 0.17,
+        "pregrasp_z_offset_m": 0.12,
+        "lift_z_offset_m": 0.12,
+        "use_vision_yaw": False,
+        "yaw_offset_deg": 0.0,
+    },
+    "safety": {
+        "require_enter_before_each_motion": True,
+        "dry_run_by_default": True,
+    },
+}
+
+
+def _deep_update(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_update(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def load_config(path: str | Path | None = None) -> dict[str, Any]:
+    config_path = resolve_project_path(path or "config.json")
+    if config_path.exists():
+        user_config = json.loads(config_path.read_text(encoding="utf-8"))
+    else:
+        user_config = {}
+    config = _deep_update(DEFAULT_CONFIG, user_config)
+    config["_project_dir"] = str(PROJECT_DIR)
+    config["_config_path"] = str(config_path)
+    return config
+
+
+def write_default_config(path: str | Path = "config.json") -> Path:
+    config_path = resolve_project_path(path)
+    config_path.write_text(
+        json.dumps(DEFAULT_CONFIG, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def path_from_config(config: dict[str, Any], dotted_key: str) -> Path:
+    node: Any = config
+    for part in dotted_key.split("."):
+        node = node[part]
+    return resolve_project_path(node)
