@@ -42,7 +42,9 @@ def main() -> int:
     ap.add_argument("--back-mm", type=float, default=60.0, help="retreat along the approach after letting go")
     ap.add_argument("--up-mm", type=float, default=100.0, help="then up")
     ap.add_argument("--finger-bottom-mm", type=float, default=14.5, help="finger bottom below the closing point")
-    ap.add_argument("--wrist-clearance-mm", type=float, default=70.0)
+    ap.add_argument("--wrist-clearance-mm", type=float, default=None, help="default grasp.side_wrist_clearance_mm (as for the grasp)")
+    ap.add_argument("--headings-deg", type=float, nargs="+", default=[0, -15, 15, -30, 30, -45, 45, -60, 60],
+                    help="hand headings over the hole, relative to straight out from the robot, tried in turn")
     ap.add_argument("--wrist-reach-mm", type=float, default=80.0, help="the wrist housings reach this far sideways: the surface "
                     "within it counts as under them (the joint 5/6 housing hit the tray's edge from 80 mm beside it)")
     ap.add_argument("--camera-clearance-mm", type=float, default=20.0)
@@ -51,6 +53,8 @@ def main() -> int:
     args = ap.parse_args()
     cfg = config_from_args(args)
     fine = "fine" if args.dynamics is None else min(args.dynamics, 0.03)
+    if args.wrist_clearance_mm is None:
+        args.wrist_clearance_mm = float(cfg["grasp"].get("side_wrist_clearance_mm", 70.0))
 
     from seedling import kinematics
     from seedling.calibration import load_T_FC
@@ -116,25 +120,25 @@ def main() -> int:
         R0 = np.array(gp["R"])
         lift_stem = G_of(q_lift)[:3, 3] + R0[:, 2] * fwd
 
-        def attitude(xy):
-            yaw = np.arctan2(xy[1], xy[0])
+        def attitude(xy, dyaw=0.0):
+            yaw = np.arctan2(xy[1], xy[0]) + np.radians(dyaw)
             a = np.array([np.cos(pitch) * np.cos(yaw), np.cos(pitch) * np.sin(yaw), -np.sin(pitch)])
             across = np.array([np.sin(yaw), -np.cos(yaw), 0.0])
             return np.column_stack([np.cross(across, a), across, a]), a
 
-        def pose(xy, z_close):
-            Rr, a = attitude(xy)
+        def pose(xy, z_close, dyaw=0.0):
+            Rr, a = attitude(xy, dyaw)
             return make_T(Rr, np.array([xy[0], xy[1], z_close]) - a * fwd)  # G = open gap centre; the closed fingers hold the stem fwd ahead
 
-        def plan_hole(hi):
+        def plan_hole(hi, dyaw):
             hxy = holes[hi]
             tried = []
             steps = [("up", make_T(R0, np.array([lift_stem[0], lift_stem[1], max(z_t, lift_stem[2])]) - R0[:, 2] * fwd)),
-                     ("across", pose(hxy, max(z_t, z_above)))]
+                     ("across", pose(hxy, max(z_t, z_above), dyaw))]
             if z_t > z_above + 1e-3:
-                steps.append(("above", pose(hxy, z_above)))
-            steps.append(("insert", pose(hxy, z_ins)))
-            Rh, ah = attitude(hxy)
+                steps.append(("above", pose(hxy, z_above, dyaw)))
+            steps.append(("insert", pose(hxy, z_ins, dyaw)))
+            Rh, ah = attitude(hxy, dyaw)
             ah_h = np.array([ah[0], ah[1], 0.0]) / np.linalg.norm(ah[:2])
             T_back = make_T(Rh, steps[-1][1][:3, 3] - ah_h * args.back_mm / 1000)
             steps += [("back", T_back), ("up after", make_T(Rh, T_back[:3, 3] + [0, 0, args.up_mm / 1000]))]
@@ -211,12 +215,17 @@ def main() -> int:
         if not order:
             print("no free hole left in the disc")
             return 1
+        # the hand's heading over the hole: straight out from the robot first, then turned (the plant turns about its
+        # own stem, it stays upright). A flat hand straight out is at joint 6's limit, as when grasping
         qs = None
         for hi in order:
-            qs, lines = plan_hole(int(hi))
+            for dyaw in args.headings_deg:
+                qs, lines = plan_hole(int(hi), dyaw)
+                if qs is not None:
+                    break
             if qs is not None:
                 break
-            print(lines[-1] if len(lines) == 1 else f"H{hi + 1}: unsafe path, next hole")
+            print(lines[-1] if len(lines) == 1 else f"H{hi + 1}: unsafe path from every heading, next hole")
         for ln in lines:
             print(ln)
         if qs is None:
@@ -226,7 +235,7 @@ def main() -> int:
         hi = int(hi)
         if args.hole and hi + 1 != args.hole:
             print(f"H{args.hole} cannot be reached now: H{hi + 1} instead")
-        print(f"hole H{hi + 1} at {np.round(holes[hi], 4).tolist()}, disc top {disc_top:.3f}; plug bottom {below * 1000:.0f} mm below the held stem; "
+        print(f"hole H{hi + 1} at {np.round(holes[hi], 4).tolist()}, hand heading {dyaw:+.0f} deg from straight out, disc top {disc_top:.3f}; plug bottom {below * 1000:.0f} mm below the held stem; "
               f"carried at plug bottom {(z_t - below - top) * 1000:.0f} mm above the tops, let go with it {args.insert_mm:.0f} mm in the hole, "
               f"finger bottom {(fingers - disc_top) * 1000:.0f} mm above the disc")
         place_file.write_text(json.dumps({"cell": args.cell, "hole": hi + 1, "hole_xy": holes[hi].tolist(), "q": {k: v.tolist() for k, v in qs.items()},

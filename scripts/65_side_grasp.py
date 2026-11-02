@@ -60,30 +60,36 @@ def main() -> int:
                          "cells need more; 26 deg alone until then)")
     ap.add_argument("--standoff-mm", type=float, default=60.0, help="pre-grasp distance behind the grasp pose")
     ap.add_argument("--ignore-cells", default="", help="comma list: cells known to be empty now (not obstacles)")
-    ap.add_argument("--headings-deg", type=float, nargs="+", default=[0, -30, 30, -60, 60, -90, 90],
+    ap.add_argument("--headings-deg", type=float, nargs="+", default=[0, -15, 15, -30, 30, -45, 45, -60, 60, -75, 75, -90, 90],
                     help="approach headings tried in turn, relative to straight out from the robot (first free and safe one wins)")
     ap.add_argument("--stage-up-mm", type=float, default=120.0, help="turn the gripper at this height above the pre-grasp, then go down")
     ap.add_argument("--transit-clearance-mm", type=float, default=120.0, help="grasp centre above the tray top while turning (over the plants)")
     ap.add_argument("--self-clearance-mm", type=float, default=90.0, help="hand (flange, camera, gripper) from the arm's own upper arm and "
                     "forearm axes on every move: Franka's self-collision reflex stopped moves at 69 mm (2026-11-02)")
+    ap.add_argument("--ik-tries", type=int, default=40, help="joint solutions of the grasp pose collected per heading (random starts)")
+    ap.add_argument("--max-branches", type=int, default=8, help="of these, at most this many tried (the camera farthest from the forearm first)")
     ap.add_argument("--lift-mm", type=float, default=20.0)
     ap.add_argument("--dx-mm", type=float, default=0.0, help="nudge: horizontal, along the approach")
     ap.add_argument("--dy-mm", type=float, default=0.0, help="nudge: along the closing axis")
     ap.add_argument("--dz-mm", type=float, default=0.0, help="nudge: up")
-    ap.add_argument("--wrist-clearance-mm", type=float, default=70.0, help="wrist joints / flange centres above what lies under them")
+    ap.add_argument("--wrist-clearance-mm", type=float, default=None, help="wrist joints / flange centres above what lies under them "
+                    "(default grasp.side_wrist_clearance_mm: 70 for the pitched grasp until 2026-11-02; a flat hand has its flange at "
+                    "the stem's height, the user judged the arm clear of the tray then)")
     ap.add_argument("--wrist-reach-mm", type=float, default=80.0, help="the wrist housings reach this far sideways (see 71)")
     ap.add_argument("--camera-clearance-mm", type=float, default=20.0, help="camera housing above what lies under it")
     ap.add_argument("--dynamics", type=float, default=None, help="one factor for all moves (default: robot.dynamics / fine_dynamics in the config)")
     args = ap.parse_args()
     cfg = config_from_args(args)
     fine = "fine" if args.dynamics is None else min(args.dynamics, 0.03)
+    if args.wrist_clearance_mm is None:
+        args.wrist_clearance_mm = float(cfg["grasp"].get("side_wrist_clearance_mm", 70.0))
 
     from seedling import kinematics
     from seedling.calibration import load_T_FC
     from seedling.config import ee_to_contact, flange_to_ee
     from seedling.robot import FrankyRobot
     from seedling.transforms import inv_T, make_T
-    from seedling.wrist import Surfaces, body_points_B, path_self_clearance
+    from seedling.wrist import Surfaces, body_points_B, path_self_clearance, self_clearance
 
     T_FC, _ = load_T_FC(cfg)
     F, G = flange_to_ee(cfg), ee_to_contact(cfg)
@@ -396,35 +402,64 @@ def main() -> int:
                 lift = grasp + [0, 0, args.lift_mm / 1000.0]
                 stage = pre + [0, 0, args.stage_up_mm / 1000.0]
                 floor_g = tray_top + args.transit_clearance_mm / 1000.0
-                # the stage pose: the solution near the current joints first, then other IK branches (one far branch
-                # folded the wrist back onto the forearm: self-collision reflex, 2026-11-02); the rest near the stage
-                T_st, branches, found = make_T(R, stage) @ inv_T(G), [], False
-                for k in range(6):
+                # the arm has 7 joints, so many joint solutions hold the hand at the grasp pose; they differ in where
+                # the elbow and wrist go. A flat hand (pitch 0) far out folds the wrist back so that the camera comes
+                # close to the forearm (Franka's self-collision reflex: 69 mm, 2026-11-02) or drops the wrist below the
+                # hand in most of them, but not in all: --ik-tries solutions of the grasp pose are collected, those clear
+                # there first (the one reached straight from the current joints first among them, then the camera
+                # farthest from the forearm); pre-grasp and stage are then solved near it, the lift near the grasp
+                T_gr, cands = make_T(R, grasp) @ inv_T(G), []
+                for k in range(args.ik_tries + 2):
                     if k == 0:
-                        q_st = ik(make_T(R, stage), q_now)
+                        q_g = ik(make_T(R, grasp), q_now)
                     else:
                         start = q_now if k == 1 else np.random.default_rng(k).uniform(kinematics.Q_MIN, kinematics.Q_MAX)
-                        q_st = kinematics.solve_ik(T_st, start, F, margin, n_random_seeds=8, rng_seed=k)
-                        if q_st is not None and (np.linalg.norm(G_of(q_st)[:3, 3] - stage) > 0.0015
-                                                 or any(np.abs(q_st - b).max() < 0.05 for b in branches)):
-                            q_st = None  # off target, or a branch already tried
-                    if q_st is None:
-                        continue
-                    branches.append(q_st)
-                    q_pre = ik(make_T(R, pre), q_st)
-                    q_gr = ik(make_T(R, grasp), q_pre) if q_pre is not None else None
-                    q_li = ik(make_T(R, lift), q_gr) if q_gr is not None else None
-                    if q_li is None:
+                        q_g = kinematics.solve_ik(T_gr, start, F, margin, n_random_seeds=0 if k > 1 else 4, rng_seed=k)
+                        if q_g is not None and np.linalg.norm(G_of(q_g)[:3, 3] - grasp) > 0.0015:
+                            q_g = None
+                    if q_g is not None and not any(np.abs(q_g - c_[1]).max() < 0.05 for c_ in cands):
+                        pts = body_points_B(q_g, T_FC, cfg)
+                        wr = np.vstack([pts["wrist joints"], pts["flange"]])
+                        clear = (self_clearance(q_g, T_FC, cfg) >= args.self_clearance_mm / 1000
+                                 and float((wr[:, 2] - surf.under(wr, args.wrist_reach_mm / 1000)).min()) >= args.wrist_clearance_mm / 1000)
+                        cands.append((not clear, k != 0, -self_clearance(q_g, T_FC, cfg), q_g))
+                cands.sort(key=lambda c_: c_[:3])
+                branches, found = [], False
+                for *_, q_gr in cands[:args.max_branches]:
+                    branches.append(q_gr)
+                    q_pre = ik(make_T(R, pre), q_gr)
+                    q_st = ik(make_T(R, stage), q_pre) if q_pre is not None else None
+                    q_li = ik(make_T(R, lift), q_gr)
+                    if q_st is None or q_li is None:
                         continue
                     found = True
                     near = float(np.degrees(np.abs(q_st - q_now)).max()) < 5.0
                     lines = [f"  {tag} from straight out" + (f" (IK branch {len(branches)})" if len(branches) > 1 else "") + ":"]
                     # the short moves first (cheap, and where a flat hand fails), the long turn last; stop at the first unsafe one
                     moves = [("down", q_st, q_pre, None), ("approach", q_pre, q_gr, None), ("lift", q_gr, q_li, None),
-                             ("retreat", q_li, q_pre, None)] + ([] if near else [("to stage", q_now, q_st, floor_g)])
+                             ("retreat", q_li, q_pre, None)]
                     ok = all(report(nm, qa, qb, gripper_floor=fl, out=lines) for nm, qa, qb, fl in moves)
+                    q_via = None
+                    if ok and not near:
+                        # the long turn to the stage: straight in joints, else through a via pose (the wrist joints 5-7
+                        # turned first up here, or last): a straight turn can sweep the camera past the forearm when both
+                        # ends are clear (2026-11-02, flat hand)
+                        trial = []
+                        if report("to stage", q_now, q_st, gripper_floor=floor_g, out=trial):
+                            lines += trial
+                        else:
+                            for name_v, qv in (("wrist first", np.r_[q_now[:4], q_st[4:]]), ("wrist last", np.r_[q_st[:4], q_now[4:]])):
+                                tv = []
+                                if report(f"to via ({name_v})", q_now, qv, gripper_floor=floor_g, out=tv) and \
+                                        report("via to stage", qv, q_st, gripper_floor=floor_g, out=tv):
+                                    lines += tv
+                                    q_via = qv
+                                    break
+                            if q_via is None:
+                                lines += trial
+                                ok = False
                     if chosen is None or ok:
-                        chosen = (pitch, dyaw, a, across, R, close_pt, q_st, q_pre, q_gr, q_li, ok, lines)
+                        chosen = (pitch, dyaw, a, across, R, close_pt, q_st, q_pre, q_gr, q_li, q_via, ok, lines)
                     if ok:
                         break
                     worst = next(ln for ln in lines[1:] if "NOT SAFE" in ln)
@@ -440,7 +475,7 @@ def main() -> int:
             print("not reachable from any heading without going through other plants")
             return 1
         print("\n".join(chosen[-1]))
-        pitch, dyaw, a, across, R, close_pt, q_st, q_pre, q_gr, q_li, ok, _ = chosen
+        pitch, dyaw, a, across, R, close_pt, q_st, q_pre, q_gr, q_li, q_via, ok, _ = chosen
         grasp = close_pt - a * fwd
         cam_above = (kinematics.fk_flange(q_gr) @ T_FC)[2, 3] > grasp[2]
         print(f"cell {args.cell}: closing point {np.round(close_pt, 4).tolist()} = cell centre + {off[0]:+.0f} mm along, {off[1]:+.0f} mm across "
@@ -449,7 +484,8 @@ def main() -> int:
         print(f"approach pitched {np.degrees(np.arcsin(-a[2])):.0f} deg down, heading {dyaw:+.0f} deg from straight out; open gripper stops "
               f"{fwd * 1000:.0f} mm behind the closing point; camera {'above' if cam_above else 'BELOW'} the gripper")
         plan_file.write_text(json.dumps({"cell": args.cell, "close_point": close_pt.tolist(), "offset_mm": list(off), "R": R.tolist(),
-                                         "q": {"start": q_now.tolist(), "stage": q_st.tolist(), "pregrasp": q_pre.tolist(), "grasp": q_gr.tolist(), "lift": q_li.tolist()},
+                                         "q": {"start": q_now.tolist(), "stage": q_st.tolist(), "pregrasp": q_pre.tolist(), "grasp": q_gr.tolist(), "lift": q_li.tolist(),
+                                               **({"via": q_via.tolist()} if q_via is not None else {})},
                                          "safe": bool(ok)}, indent=1))
         print("plan saved" if ok else "plan saved but NOT SAFE: the motion phases will refuse it", plan_file.relative_to(PROJECT_DIR))
         return 0 if ok else 1
@@ -483,6 +519,8 @@ def main() -> int:
         attrs[2] &= ~termios.HUPCL
         termios.tcsetattr(ser.fd, termios.TCSANOW, attrs)
         ser.close()
+        if "via" in q and not move(q["via"], args.dynamics, "turn (via pose)"):
+            return 1
         if not move(q["stage"], args.dynamics, "turn above the pre-grasp"):
             return 1
         return 0 if move(q["pregrasp"], args.dynamics, "down to the pre-grasp") else 1
