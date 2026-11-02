@@ -120,7 +120,11 @@ def main() -> int:
             rc, out = run(["scripts/60_tray_locate.py"], quiet=True)
             print("\n".join(ln[:200] for ln in out.splitlines() if ln.startswith(("grid", "disc", "overlay")) or "cells with" in ln))
             if rc != 0:
-                print("the tray was not located: stopped (is it fully in view?)")
+                err = [ln for ln in out.splitlines() if ln.startswith(("RuntimeError", "FileNotFoundError")) or "Exception:" in ln]
+                if err:
+                    print(f"locating failed: {err[-1][:200]}: stopped")
+                else:
+                    print("the tray was not located: stopped (is it fully in view?)")
                 break
         grid, disc = load()
         if not disc.get("ok") or disc.get("ok_last_picture") is False:
