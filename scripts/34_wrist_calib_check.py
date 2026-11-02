@@ -92,13 +92,13 @@ def main() -> int:
     if q is None or np.degrees(np.abs(q - robot.q())).max() > 45:
         print("cannot reach a pose above the marker without a large joint change; move the robot closer first")
         return 1
-    robot.move_joints(q, dynamics=float(cfg["robot"]["dynamics"]), description=f"{(above[2, 3] - m[2]) * 1000:.0f} mm above the marker")
-    r = robot.move_contact_to(target, dynamics=float(cfg["robot"]["fine_dynamics"]), force_limit_n=10.0,
+    robot.move_joints(q, dynamics=0.05, description=f"{(above[2, 3] - m[2]) * 1000:.0f} mm above the marker")
+    r = robot.move_contact_to(target, dynamics=0.02, force_limit_n=10.0,
                               description=f"descend to {(target[2, 3] - m[2]) * 1000:.0f} mm above the marker centre")
     print(r)
     print("看一下：夹爪两指的中心是否在标记中心正上方？偏差大概多少毫米、往哪个方向？")
     input("按 Enter 抬起夹爪 ...")
-    robot.move_contact_to(above, dynamics=float(cfg["robot"]["fine_dynamics"]), description="lift")
+    robot.move_contact_to(above, dynamics=0.02, description="lift")
     return 0
 
 

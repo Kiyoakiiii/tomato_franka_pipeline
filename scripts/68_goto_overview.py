@@ -18,7 +18,7 @@ def main() -> int:
     ap = base_parser(__doc__)
     ap.add_argument("--up-to", type=float, default=0.32, help="lift the grasp centre to at least this z first")
     ap.add_argument("--min-z", type=float, default=0.30, help="lowest allowed z of any checked part after the lift")
-    ap.add_argument("--dynamics", type=float, default=0.05)
+    ap.add_argument("--dynamics", type=float, default=None, help="one factor for all moves (default: robot.dynamics in the config)")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     cfg = config_from_args(args)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """Side grasp of one plant from the tray grid (vision not needed): the gripper comes from the robot's side towards
-the cell, pitched down --pitch-deg (26 deg: the pose set by hand for the first grasp), closing axis horizontal,
+the cell, pitched down as little as is safe (--pitch-deg / grasp.side_pitch_deg, flattest first: the fingers
+parallel to the tray as asked on 2026-11-02; 26 deg alone before), closing axis horizontal,
 camera above the gripper, and is moved so that the fingers CLOSE on the stem, taken at the cell centre (+ an
 offset) a little above the plug top.
 The fingers swing forward when closing (gripper.pin_brake.close_forward_m), so the open gripper stops that far
@@ -53,7 +54,10 @@ def main() -> int:
     ap.add_argument("--offset-mm", type=float, nargs=2, default=None, metavar=("ALONG", "ACROSS"),
                     help="closing point shift from the cell centre: along the approach (horizontal) and along the closing "
                          "axis (default: grasp.side_offset_mm in the config)")
-    ap.add_argument("--pitch-deg", type=float, default=26.0, help="approach pitched down from horizontal (wrist >= 7 cm above the tray needs ~26 deg or more)")
+    ap.add_argument("--pitch-deg", type=float, nargs="+", default=None,
+                    help="approach pitches down from horizontal, tried in turn (default grasp.side_pitch_deg: the flattest first, the "
+                         "fingers parallel to the tray as asked on 2026-11-02; a flat hand puts the wrist at the stem's height, so most "
+                         "cells need more; 26 deg alone until then)")
     ap.add_argument("--standoff-mm", type=float, default=60.0, help="pre-grasp distance behind the grasp pose")
     ap.add_argument("--ignore-cells", default="", help="comma list: cells known to be empty now (not obstacles)")
     ap.add_argument("--headings-deg", type=float, nargs="+", default=[0, -30, 30, -60, 60, -90, 90],
@@ -66,24 +70,29 @@ def main() -> int:
     ap.add_argument("--dx-mm", type=float, default=0.0, help="nudge: horizontal, along the approach")
     ap.add_argument("--dy-mm", type=float, default=0.0, help="nudge: along the closing axis")
     ap.add_argument("--dz-mm", type=float, default=0.0, help="nudge: up")
-    ap.add_argument("--wrist-clearance-mm", type=float, default=70.0, help="wrist joints / flange centres above the tray top")
-    ap.add_argument("--camera-clearance-mm", type=float, default=20.0, help="camera housing above the tray top")
-    ap.add_argument("--dynamics", type=float, default=0.05)
+    ap.add_argument("--wrist-clearance-mm", type=float, default=70.0, help="wrist joints / flange centres above what lies under them")
+    ap.add_argument("--wrist-reach-mm", type=float, default=80.0, help="the wrist housings reach this far sideways (see 71)")
+    ap.add_argument("--camera-clearance-mm", type=float, default=20.0, help="camera housing above what lies under it")
+    ap.add_argument("--dynamics", type=float, default=None, help="one factor for all moves (default: robot.dynamics / fine_dynamics in the config)")
     args = ap.parse_args()
     cfg = config_from_args(args)
+    fine = "fine" if args.dynamics is None else min(args.dynamics, 0.03)
 
     from seedling import kinematics
     from seedling.calibration import load_T_FC
     from seedling.config import ee_to_contact, flange_to_ee
     from seedling.robot import FrankyRobot
     from seedling.transforms import inv_T, make_T
-    from seedling.wrist import body_points_B, path_self_clearance
+    from seedling.wrist import Surfaces, body_points_B, path_self_clearance
 
     T_FC, _ = load_T_FC(cfg)
     F, G = flange_to_ee(cfg), ee_to_contact(cfg)
     margin = float(cfg["robot"]["ik_joint_margin_rad"])
     grid = json.loads((PROJECT_DIR / cfg["tray"]["grid_file"]).read_text())
     tray_top = float(grid["z_top"])
+    disc_file = PROJECT_DIR / "calibration" / "disc.json"
+    # wrist and camera clearances are over what lies under them (tray top, disc top or table), as in 71
+    surf = Surfaces(grid, json.loads(disc_file.read_text()) if disc_file.exists() else None, cfg)
     out = PROJECT_DIR / "experiments" / "grasp"
     out.mkdir(parents=True, exist_ok=True)
     plan_file = out / f"{args.cell}_side_plan.json"
@@ -100,22 +109,25 @@ def main() -> int:
         return q
 
     def check(qa, qb, n=61, gripper_floor=None):
+        # lows: wrist/flange and camera as clearance over what lies under them; grasp centre as height
         lows = {"wrist": np.inf, "camera": np.inf, "gripper": np.inf}
         dev = 0.0
         pa, pb = G_of(qa)[:3, 3], G_of(qb)[:3, 3]
         for s in np.linspace(0, 1, n):
             q = qa + s * (qb - qa)
             pts = body_points_B(q, T_FC, cfg)
-            lows["wrist"] = min(lows["wrist"], float(pts["wrist joints"][:, 2].min()), float(pts["flange"][:, 2].min()))
-            lows["camera"] = min(lows["camera"], float(pts["camera housing"][:, 2].min()))
+            wr = np.vstack([pts["wrist joints"], pts["flange"]])
+            lows["wrist"] = min(lows["wrist"], float((wr[:, 2] - surf.under(wr, args.wrist_reach_mm / 1000)).min()))
+            cm = pts["camera housing"]
+            lows["camera"] = min(lows["camera"], float((cm[:, 2] - surf.under(cm)).min()))
             g = G_of(q)[:3, 3]
             lows["gripper"] = min(lows["gripper"], float(g[2]))
             dev = max(dev, float(np.linalg.norm(np.cross(g - pa, pb - pa)) / max(np.linalg.norm(pb - pa), 1e-9)))
         bad = []
-        if lows["wrist"] < tray_top + args.wrist_clearance_mm / 1000:
-            bad.append(f"wrist/flange {lows['wrist']:.3f}")
-        if lows["camera"] < tray_top + args.camera_clearance_mm / 1000:
-            bad.append(f"camera {lows['camera']:.3f}")
+        if lows["wrist"] < args.wrist_clearance_mm / 1000:
+            bad.append(f"wrist/flange {lows['wrist'] * 1000:.0f} mm")
+        if lows["camera"] < args.camera_clearance_mm / 1000:
+            bad.append(f"camera {lows['camera'] * 1000:.0f} mm")
         if gripper_floor is not None and lows["gripper"] < gripper_floor:
             bad.append(f"grasp centre {lows['gripper']:.3f}")
         lows["self"] = path_self_clearance(qa, qb, T_FC, cfg)
@@ -124,10 +136,10 @@ def main() -> int:
         step = float(np.degrees(np.abs(qb - qa)).max())
         return step, lows, dev, bad
 
-    def report(name, qa, qb, gripper_floor=None):
+    def report(name, qa, qb, gripper_floor=None, out=None):
         step, lows, dev, bad = check(qa, qb, gripper_floor=gripper_floor)
-        print(f"  {name:10s}: max joint change {step:5.1f} deg; lowest wrist/flange {lows['wrist']:.3f}, camera {lows['camera']:.3f}, "
-              f"grasp centre {lows['gripper']:.3f} "
+        (print if out is None else out.append)(f"  {name:10s}: max joint change {step:5.1f} deg; wrist/flange {lows['wrist'] * 1000:.0f} mm, camera {lows['camera'] * 1000:.0f} mm "
+              f"over what lies below, grasp centre down to {lows['gripper']:.3f} "
               f"(tray top {tray_top:.3f}); grasp centre off the straight line {dev * 1000:4.1f} mm; hand from the arm itself "
               f"{lows['self'] * 1000:.0f} mm" + (f"  <-- NOT SAFE {bad}" if bad else ""))
         return not bad
@@ -294,11 +306,12 @@ def main() -> int:
             print(f"the soil lies {(tray_top - soil_z) * 1000:.0f} mm below the tray top: closing point raised to "
                   f"{args.rim_clearance_mm:.0f} mm above the tray top ({(z_close - soil_z) * 1000:.0f} mm above the soil)")
         fwd = float(cfg["gripper"]["pin_brake"].get("close_forward_m", 0.0))
-        pt = np.radians(args.pitch_deg)
+        pitches = args.pitch_deg or cfg["grasp"].get("side_pitch_deg", [26.0])
         # approach heading: straight out from the robot if nothing grows in the way, else turned up to 90 deg (a
         # tray with its long side along the reach has the plants in lines along the approach). In the way = another
         # occupied cell within 30 mm of the gripper's path over the 14 cm behind the stem (fingers, then the body
-        # rising at the pitch angle; the plants' stems and leaves stand there)
+        # rising at the pitch angle; the plants' stems and leaves stand there); a flatter hand stays low for longer
+        # behind the stem: up to 30 cm at 0 deg, 45 mm wide past the first 14 cm (the flange and wrist)
         gone = set(filter(None, args.ignore_cells.split(",")))
         # soil lying at the bottom of a cell (fallen scraps, 2026-10-28 E2/F2: 40 mm below the tray top) stands in no
         # one's way: an obstacle is a plant (green over it) or soil reaching within 20 mm of the tray top
@@ -308,7 +321,8 @@ def main() -> int:
         occupied = [np.array(grid["cells"][k][:2]) for k in obstacles]
         radial = np.arctan2(c[1], c[0])
 
-        def blocked(yaw):
+        def blocked(yaw, pitch_deg):
+            reach = 0.14 if pitch_deg >= 26 else min(0.30, 0.14 * np.tan(np.radians(26)) / max(np.tan(np.radians(pitch_deg)), 1e-6))
             back = -np.array([np.cos(yaw), np.sin(yaw)])
             hits = []
             for k, o in zip(obstacles, occupied):
@@ -317,7 +331,7 @@ def main() -> int:
                 lat = abs(float(d @ np.array([-back[1], back[0]])))
                 # behind the stem: the gripper's path; beside it: the open fingers (44 mm gap + finger, and stems
                 # lean): a neighbour 39 mm off the line got caught instead of the target (D4 -> C4, 2026-10-28)
-                if (0.015 < s_ < 0.14 and lat < 0.030) or (-0.03 < s_ <= 0.015 and lat < 0.042):
+                if (0.015 < s_ < 0.14 and lat < 0.030) or (-0.03 < s_ <= 0.015 and lat < 0.042) or (0.14 <= s_ < reach and lat < 0.045):
                     hits.append(k)
             return hits
 
@@ -353,66 +367,80 @@ def main() -> int:
             need = soilP[m, 2] + args.finger_clearance_mm / 1000 + 0.0145
             return float(np.percentile(need, 98))
 
-        chosen = None
-        for dyaw in args.headings_deg:
-            yaw = radial + np.radians(dyaw)
-            hits = blocked(yaw)
-            if hits:
-                print(f"  heading {dyaw:+.0f} deg: plants in the way ({', '.join(hits)})")
-                continue
-            a = np.array([np.cos(pt) * np.cos(yaw), np.cos(pt) * np.sin(yaw), -np.sin(pt)])  # approach
-            across = np.array([np.sin(yaw), -np.cos(yaw), 0.0])  # closing axis, horizontal (as on the first grasp: towards -y)
-            R = np.column_stack([np.cross(across, a), across, a])
-            a_h = np.array([a[0], a[1], 0.0]) / np.linalg.norm(a[:2])
-            z_c, z_ff = z_close, finger_floor(yaw)
-            if z_ff is not None and z_ff > z_close:
-                z_c = z_ff
-                print(f"  heading {dyaw:+.0f} deg: closing point raised {(z_c - z_close) * 1000:.0f} mm so the open fingers clear the "
-                      f"neighbouring soil by {args.finger_clearance_mm:.0f} mm")
-            close_pt = np.array([c[0], c[1], z_c]) + a_h * off[0] / 1000.0 + across * off[1] / 1000.0
-            grasp = close_pt - a * fwd  # the open gap centre: the fingers swing forward onto close_pt
-            pre = grasp - a * args.standoff_mm / 1000.0
-            lift = grasp + [0, 0, args.lift_mm / 1000.0]
-            stage = pre + [0, 0, args.stage_up_mm / 1000.0]
-            floor_g = tray_top + args.transit_clearance_mm / 1000.0
-            # the stage pose: the solution near the current joints first, then other IK branches (one far branch
-            # folded the wrist back onto the forearm: self-collision reflex, 2026-11-02); the rest near the stage
-            T_st, branches, found = make_T(R, stage) @ inv_T(G), [], False
-            for k in range(6):
-                if k == 0:
-                    q_st = ik(make_T(R, stage), q_now)
-                else:
-                    start = q_now if k == 1 else np.random.default_rng(k).uniform(kinematics.Q_MIN, kinematics.Q_MAX)
-                    q_st = kinematics.solve_ik(T_st, start, F, margin, n_random_seeds=8, rng_seed=k)
-                    if q_st is not None and (np.linalg.norm(G_of(q_st)[:3, 3] - stage) > 0.0015
-                                             or any(np.abs(q_st - b).max() < 0.05 for b in branches)):
-                        q_st = None  # off target, or a branch already tried
-                if q_st is None:
+        # the flattest pitch first (fingers parallel to the tray), every heading at it, then the next pitch: the first
+        # fully safe plan wins. Only the chosen plan's moves are printed in full, the others as one line each
+        chosen, raised = None, set()
+        for pitch in pitches:
+            pt = np.radians(pitch)
+            for dyaw in args.headings_deg:
+                yaw = radial + np.radians(dyaw)
+                tag = f"pitch {pitch:g} deg, heading {dyaw:+.0f} deg"
+                hits = blocked(yaw, pitch)
+                if hits:
+                    print(f"  {tag}: plants in the way ({', '.join(hits)})")
                     continue
-                branches.append(q_st)
-                q_pre = ik(make_T(R, pre), q_st)
-                q_gr = ik(make_T(R, grasp), q_pre) if q_pre is not None else None
-                q_li = ik(make_T(R, lift), q_gr) if q_gr is not None else None
-                if q_li is None:
+                a = np.array([np.cos(pt) * np.cos(yaw), np.cos(pt) * np.sin(yaw), -np.sin(pt)])  # approach
+                across = np.array([np.sin(yaw), -np.cos(yaw), 0.0])  # closing axis, horizontal (as on the first grasp: towards -y)
+                R = np.column_stack([np.cross(across, a), across, a])
+                a_h = np.array([a[0], a[1], 0.0]) / np.linalg.norm(a[:2])
+                z_c, z_ff = z_close, finger_floor(yaw)
+                if z_ff is not None and z_ff > z_close:
+                    z_c = z_ff
+                    if dyaw not in raised:
+                        raised.add(dyaw)
+                        print(f"  heading {dyaw:+.0f} deg: closing point raised {(z_c - z_close) * 1000:.0f} mm so the open fingers clear the "
+                              f"neighbouring soil by {args.finger_clearance_mm:.0f} mm")
+                close_pt = np.array([c[0], c[1], z_c]) + a_h * off[0] / 1000.0 + across * off[1] / 1000.0
+                grasp = close_pt - a * fwd  # the open gap centre: the fingers swing forward onto close_pt
+                pre = grasp - a * args.standoff_mm / 1000.0
+                lift = grasp + [0, 0, args.lift_mm / 1000.0]
+                stage = pre + [0, 0, args.stage_up_mm / 1000.0]
+                floor_g = tray_top + args.transit_clearance_mm / 1000.0
+                # the stage pose: the solution near the current joints first, then other IK branches (one far branch
+                # folded the wrist back onto the forearm: self-collision reflex, 2026-11-02); the rest near the stage
+                T_st, branches, found = make_T(R, stage) @ inv_T(G), [], False
+                for k in range(6):
+                    if k == 0:
+                        q_st = ik(make_T(R, stage), q_now)
+                    else:
+                        start = q_now if k == 1 else np.random.default_rng(k).uniform(kinematics.Q_MIN, kinematics.Q_MAX)
+                        q_st = kinematics.solve_ik(T_st, start, F, margin, n_random_seeds=8, rng_seed=k)
+                        if q_st is not None and (np.linalg.norm(G_of(q_st)[:3, 3] - stage) > 0.0015
+                                                 or any(np.abs(q_st - b).max() < 0.05 for b in branches)):
+                            q_st = None  # off target, or a branch already tried
+                    if q_st is None:
+                        continue
+                    branches.append(q_st)
+                    q_pre = ik(make_T(R, pre), q_st)
+                    q_gr = ik(make_T(R, grasp), q_pre) if q_pre is not None else None
+                    q_li = ik(make_T(R, lift), q_gr) if q_gr is not None else None
+                    if q_li is None:
+                        continue
+                    found = True
+                    near = float(np.degrees(np.abs(q_st - q_now)).max()) < 5.0
+                    lines = [f"  {tag} from straight out" + (f" (IK branch {len(branches)})" if len(branches) > 1 else "") + ":"]
+                    # the short moves first (cheap, and where a flat hand fails), the long turn last; stop at the first unsafe one
+                    moves = [("down", q_st, q_pre, None), ("approach", q_pre, q_gr, None), ("lift", q_gr, q_li, None),
+                             ("retreat", q_li, q_pre, None)] + ([] if near else [("to stage", q_now, q_st, floor_g)])
+                    ok = all(report(nm, qa, qb, gripper_floor=fl, out=lines) for nm, qa, qb, fl in moves)
+                    if chosen is None or ok:
+                        chosen = (pitch, dyaw, a, across, R, close_pt, q_st, q_pre, q_gr, q_li, ok, lines)
+                    if ok:
+                        break
+                    worst = next(ln for ln in lines[1:] if "NOT SAFE" in ln)
+                    print(f"{lines[0][:-1]}: NOT SAFE at {worst.split(':')[0].strip()} {worst[worst.index('NOT SAFE') + 9:]}")
+                if not found:
+                    print(f"  {tag}: not reachable")
                     continue
-                found = True
-                near = float(np.degrees(np.abs(q_st - q_now)).max()) < 5.0
-                print(f"  heading {dyaw:+.0f} deg from straight out" + (f" (IK branch {len(branches)})" if len(branches) > 1 else "") + ":")
-                ok = (True if near else report("to stage", q_now, q_st, gripper_floor=floor_g)) & report("down", q_st, q_pre) \
-                    & report("approach", q_pre, q_gr) & report("lift", q_gr, q_li) & report("retreat", q_li, q_pre)
-                if chosen is None or ok:
-                    chosen = (dyaw, a, across, R, close_pt, q_st, q_pre, q_gr, q_li, ok)
-                if ok:
+                if chosen[-2]:
                     break
-            if not found:
-                print(f"  heading {dyaw:+.0f} deg: not reachable")
-                continue
-            if chosen[-1]:
+            if chosen is not None and chosen[-2]:
                 break
         if chosen is None:
             print("not reachable from any heading without going through other plants")
             return 1
-        dyaw, a, across, R, close_pt, q_st, q_pre, q_gr, q_li, ok = chosen
+        print("\n".join(chosen[-1]))
+        pitch, dyaw, a, across, R, close_pt, q_st, q_pre, q_gr, q_li, ok, _ = chosen
         grasp = close_pt - a * fwd
         cam_above = (kinematics.fk_flange(q_gr) @ T_FC)[2, 3] > grasp[2]
         print(f"cell {args.cell}: closing point {np.round(close_pt, 4).tolist()} = cell centre + {off[0]:+.0f} mm along, {off[1]:+.0f} mm across "
@@ -461,7 +489,7 @@ def main() -> int:
     if args.phase == "approach":
         if not at("pregrasp"):
             return 1
-        return 0 if move(q["grasp"], min(args.dynamics, 0.03), "approach") else 1
+        return 0 if move(q["grasp"], fine, "approach") else 1
     if args.phase == "nudge":
         T = G_of(q_now)
         a = T[:3, 2]
@@ -487,16 +515,16 @@ def main() -> int:
     if args.phase == "lift":
         if not at("grasp"):
             return 1
-        return 0 if move(q["lift"], min(args.dynamics, 0.03), "lift") else 1
+        return 0 if move(q["lift"], fine, "lift") else 1
     if args.phase == "lower":
         if not at("lift"):
             return 1
-        return 0 if move(q["grasp"], min(args.dynamics, 0.03), "put back down") else 1
+        return 0 if move(q["grasp"], fine, "put back down") else 1
     # retreat
     if not any(np.degrees(np.abs(q_now - q[k])).max() <= 2.0 for k in ("lift", "grasp")):
         print("refused: neither at the lift nor at the grasp pose")
         return 1
-    return 0 if move(q["pregrasp"], args.dynamics, "back to the pre-grasp") else 1
+    return 0 if move(q["pregrasp"], fine, "back to the pre-grasp") else 1
 
 
 if __name__ == "__main__":

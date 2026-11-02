@@ -47,16 +47,17 @@ def main() -> int:
                     "within it counts as under them (the joint 5/6 housing hit the tray's edge from 80 mm beside it)")
     ap.add_argument("--camera-clearance-mm", type=float, default=20.0)
     ap.add_argument("--self-clearance-mm", type=float, default=90.0, help="hand from the arm's own upper arm and forearm (see 65)")
-    ap.add_argument("--dynamics", type=float, default=0.05)
+    ap.add_argument("--dynamics", type=float, default=None, help="one factor for all moves (default: robot.dynamics / fine_dynamics in the config)")
     args = ap.parse_args()
     cfg = config_from_args(args)
+    fine = "fine" if args.dynamics is None else min(args.dynamics, 0.03)
 
     from seedling import kinematics
     from seedling.calibration import load_T_FC
     from seedling.config import ee_to_contact, flange_to_ee
     from seedling.robot import FrankyRobot
     from seedling.transforms import inv_T, make_T
-    from seedling.wrist import body_points_B, path_self_clearance
+    from seedling.wrist import Surfaces, body_points_B, path_self_clearance
 
     T_FC, _ = load_T_FC(cfg)
     F, G = flange_to_ee(cfg), ee_to_contact(cfg)
@@ -101,25 +102,8 @@ def main() -> int:
         fwd = float(cfg["gripper"]["pin_brake"].get("close_forward_m", 0.0))
         pitch = np.arcsin(-np.array(gp["R"])[2, 2])
         top = max(tray_top, disc_top)
-        # surface height under a point: tray top within the tray (cell centres + half a pitch + rim), disc top within
-        # the disc (+1 cm), else the table
-        import cv2
-
-        cell_pitch = float(cfg["tray"]["model"]["pitch_m"])
-        cells_xy = np.array([v[:2] for v in grid["cells"].values()], np.float32)
-        hull = cv2.convexHull(cells_xy)
-        table_z = float(grid.get("table_z", tray_top - 0.08))
-        dc, dr = np.array(disc["centre"]), 0.085 + 0.01
-
-        def floor_at(P, reach=0.0):
-            """the highest surface within `reach` (horizontally) of each point"""
-            f = np.full(len(P), table_z)
-            for i, (x, y) in enumerate(P[:, :2]):
-                if cv2.pointPolygonTest(hull, (float(x), float(y)), True) > -(cell_pitch / 2 + 0.015 + reach):
-                    f[i] = tray_top
-                elif np.hypot(x - dc[0], y - dc[1]) < dr + reach:
-                    f[i] = disc_top
-            return f
+        surf = Surfaces(grid, disc, cfg)
+        floor_at = surf.under
 
         z_t = max(top + args.transit_mm / 1000 + below, cp[2] + 0.0)
         z_above = disc_top + args.above_mm / 1000 + below
@@ -277,11 +261,11 @@ def main() -> int:
         last = "above" if "above" in q else "across"
         if not at(last):
             return 1
-        return 0 if move(q["insert"], min(args.dynamics, 0.03), "insert into the hole") else 1
+        return 0 if move(q["insert"], fine, "insert into the hole") else 1
     # retreat
     if not at("insert", 2.0):
         return 1
-    if not move(q["back"], min(args.dynamics, 0.03), "back out of the stem"):
+    if not move(q["back"], fine, "back out of the stem"):
         return 1
     return 0 if move(q["up after"], args.dynamics, "up") else 1
 

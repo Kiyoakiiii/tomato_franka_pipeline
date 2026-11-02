@@ -31,7 +31,8 @@ def main() -> int:
     ap.add_argument("--cell", required=True)
     ap.add_argument("--lift-mm", type=float, default=60.0)
     ap.add_argument("--put-back", action="store_true", help="after lifting, put the plant back and let go")
-    ap.add_argument("--hold-s", type=float, default=2.0, help="pause at the top of the lift")
+    ap.add_argument("--pitch-deg", type=float, nargs="+", default=None, help="grasp pitches to try (65 plan; default from the config)")
+    ap.add_argument("--hold-s", type=float, default=0.5, help="pause at the top of the lift (2 s until 2026-11-02)")
     ap.add_argument("--place", type=int, nargs="?", const=0, default=None, metavar="HOLE",
                     help="transplant: put the plant into this disc hole (1..6; no number: the planner's choice)")
     args = ap.parse_args()
@@ -43,7 +44,8 @@ def main() -> int:
     py = sys.executable
     c = ["--cell", args.cell]
     steps = [("observe the plug", ["scripts/65_side_grasp.py", "observe", *c]),
-             ("plan", ["scripts/65_side_grasp.py", "plan", *c, "--lift-mm", str(args.lift_mm)]),
+             ("plan", ["scripts/65_side_grasp.py", "plan", *c, "--lift-mm", str(args.lift_mm),
+                       *(["--pitch-deg", *map(str, args.pitch_deg)] if args.pitch_deg else [])]),
              ("pre-grasp", ["scripts/65_side_grasp.py", "pregrasp", *c]),
              ("approach", ["scripts/65_side_grasp.py", "approach", *c]),
              ("close", ["scripts/66_gripper.py", "close"]),

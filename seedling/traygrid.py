@@ -172,10 +172,18 @@ def locate_tray(frame: Frame, T_BC: np.ndarray, cfg: dict, prior: dict | None = 
         # any orientation (the grid looks the same turned by 180 deg): 2 deg, then 0.5 deg, then 0.1 deg
         angles = np.arange(-90.0, 90.0, 2.0)
     best = None
-    for ang in angles:
-        v, M, loc, mk = _match(I, t0, ang, None if want is None else (want, win))
-        if best is None or v > best[0]:
-            best = (v, ang, M, loc, mk)
+    if prior is None:
+        # the 2 deg sweep on a half-size picture (16x less work: it took most of a locate's 13 s); only its best
+        # angle is kept, the finer steps below are at full size
+        I2 = cv2.resize(I, (I.shape[1] // 2, I.shape[0] // 2), interpolation=cv2.INTER_AREA)
+        t2 = cv2.resize(t0, (t0.shape[1] // 2, t0.shape[0] // 2), interpolation=cv2.INTER_AREA)
+        coarse = max((_match(I2, t2, ang)[0], ang) for ang in angles)
+        best = (-np.inf, coarse[1], None, None, None)
+    else:
+        for ang in angles:
+            v, M, loc, mk = _match(I, t0, ang, (want, win))
+            if best is None or v > best[0]:
+                best = (v, ang, M, loc, mk)
     if prior is None:
         for step, half in ((0.5, 2.0), (0.1, 0.5)):
             for ang in np.arange(best[1] - half, best[1] + half + 1e-6, step):

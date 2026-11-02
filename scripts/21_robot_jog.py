@@ -5,7 +5,7 @@
     --dx/--dy/--dz MM           translate the EE in the BASE frame (orientation kept)
     --to X Y Z                  move the contact point G to absolute base coordinates (m), orientation kept
 
-Every motion asks for Enter first and uses robot.fine_dynamics unless --dynamics is given.
+Every motion asks for Enter first and is slow (dynamics 0.02) unless --dynamics is given.
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ def main() -> int:
     from seedling.robot import FrankyRobot
 
     robot = FrankyRobot(cfg, step_mode=True)
-    dyn = args.dynamics if args.dynamics is not None else float(cfg["robot"]["fine_dynamics"])
+    dyn = args.dynamics if args.dynamics is not None else 0.02
     print("start EE:", np.round(robot.T_BE()[:3, 3], 4).tolist())
     if robot.has_errors():
         print("robot reports errors; run 20_robot_state.py --recover after checking the cause")

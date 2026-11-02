@@ -24,6 +24,7 @@ from __future__ import annotations
 import _common  # noqa: F401  (first: caps math threads, sets project paths)
 
 import json
+import re
 import subprocess
 import sys
 import time
@@ -152,38 +153,51 @@ def main() -> int:
             print(f"{done} plants done (--max-plants)")
             break
         chosen, no_place = None, []
+        pitches = [float(x) for x in cfg["grasp"].get("side_pitch_deg", [26.0])]
         for k in todo:
             obs = grasp_dir / f"{k}_observe.json"
             if obs.exists():
                 obs.unlink()  # an old close-up of this cell is stale: the plan uses the overview's soil height
-            rg, og = run(["scripts/65_side_grasp.py", "plan", "--cell", k, "--lift-mm", str(args.lift_mm),
-                          "--ignore-cells", ",".join(sorted(sim_removed))], quiet=True)
-            if rg != 0:
-                why = [ln for ln in og.splitlines() if "not reachable" in ln or "NOT SAFE" in ln or "TOO LOW" in ln]
-                if "Connection to FCI refused" in og or "NetworkException" in og:
-                    print("cannot connect to the robot (is FCI enabled in Desk?): stopped")
-                    return 1
-                last = [ln for ln in og.splitlines() if ln.strip()]
-                print(f"  {k}: no safe grasp now ({why[-1].strip() if why else (last[-1].strip()[:160] if last else 'refused')})")
-                continue
-            rp, op = run(["scripts/71_place_in_disc.py", "plan", "--cell", k, "--free", ",".join(map(str, free))], quiet=True)
-            if rp != 0:
+            # the flattest safe grasp first; when the plant cannot be placed from it (the hand stays as flat while
+            # carrying and letting go), the grasp is planned again from the next steeper pitch
+            left = pitches
+            while left:
+                rg, og = run(["scripts/65_side_grasp.py", "plan", "--cell", k, "--lift-mm", str(args.lift_mm),
+                              "--ignore-cells", ",".join(sorted(sim_removed)), "--pitch-deg", *map(str, left)], quiet=True)
+                if rg != 0:
+                    lines_ = og.splitlines()
+                    # the one-line verdicts of the steepest pitch tried (the full report of the fallback plan is long)
+                    why = [ln for ln in lines_ if "NOT SAFE at" in ln] or [ln for ln in lines_ if "not reachable" in ln or "in the way" in ln]
+                    if "Connection to FCI refused" in og or "NetworkException" in og:
+                        print("cannot connect to the robot (is FCI enabled in Desk?): stopped")
+                        return 1
+                    last = [ln for ln in og.splitlines() if ln.strip()]
+                    print(f"  {k}: no safe grasp now ({why[-1].strip() if why else (last[-1].strip()[:160] if last else 'refused')})")
+                    break
+                m = [re.search(r"pitched (-?\d+) deg down, heading ([-+]?\d+) deg", ln) for ln in og.splitlines() if ln.startswith("approach pitched")]
+                m = m[0] if m and m[0] else None
+                rp, op = run(["scripts/71_place_in_disc.py", "plan", "--cell", k, "--free", ",".join(map(str, free))], quiet=True)
+                if rp == 0:
+                    hole = json.loads((grasp_dir / f"{k}_place_plan.json").read_text())["hole"]
+                    chosen = (k, hole, f"俯角 {m[1]}°，方向 {m[2]}°" if m else "", [p_ for p_ in left if m is None or p_ >= float(m[1])])
+                    print(f"  {k}: grasp pitched {m[1] if m else '?'} deg, heading {m[2] if m else '?'} deg, into H{hole}")
+                    break
                 why = [ln for ln in op.splitlines() if ln.strip()]
-                print(f"  {k}: grasp ok, no safe placement ({why[-1].strip() if why else 'refused'})")
-                no_place.append(k)
-                continue
-            hole = json.loads((grasp_dir / f"{k}_place_plan.json").read_text())["hole"]
-            head = [ln for ln in og.splitlines() if "heading" in ln and "from straight out" in ln]
-            chosen = (k, hole, head[0].strip().rstrip(":") if head else "")
-            print(f"  {k}: grasp {chosen[2]}, into H{hole}")
-            break
+                steeper = [p_ for p_ in left if m is not None and p_ > float(m[1])]
+                print(f"  {k}: grasp pitched {m[1] if m else '?'} deg ok, no safe placement from it ({why[-1].strip() if why else 'refused'})"
+                      + ("; trying steeper" if steeper else ""))
+                left = steeper
+                if not left:
+                    no_place.append(k)
+            if chosen is not None:
+                break
         if chosen is None:
             print("no plant left that can be grasped and placed safely: stopped")
             if no_place:
                 print(f"({len(no_place)} could be grasped but no free hole reached: the disc may be too close to the robot; "
                       "about 0.65 m from the base worked on 2026-10-28)")
             break
-        k, hole, head = chosen
+        k, hole, head, pitch_list = chosen
         log["rounds"].append({"cell": k, "hole": hole, "free_before": free})
         log_file.write_text(json.dumps(log, indent=1))
         if args.dry_run:
@@ -200,7 +214,8 @@ def main() -> int:
         if not go_on(f"夹取 {k}，放进 H{hole}（{head}）"):
             break
         print(f">>> transplant {k} -> H{hole}", flush=True)
-        rc, _ = run(["scripts/69_pick_cycle.py", "--cell", k, "--lift-mm", str(args.lift_mm), "--place", str(hole)])
+        rc, _ = run(["scripts/69_pick_cycle.py", "--cell", k, "--lift-mm", str(args.lift_mm), "--place", str(hole),
+                     "--pitch-deg", *map(str, pitch_list)])
         if rc != 0:
             print(f"the cycle for {k} stopped (exit {rc}): stopped here, the arm is where that step left it")
             break

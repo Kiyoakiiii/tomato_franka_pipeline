@@ -62,6 +62,36 @@ def path_self_clearance(qa: np.ndarray, qb: np.ndarray, T_FC: np.ndarray, cfg: d
     return min(self_clearance(qa + s * (qb - qa), T_FC, cfg) for s in np.linspace(0.0, 1.0, n))
 
 
+class Surfaces:
+    """What lies under a point: the tray top within the tray (the rectangle of its cell centres + half a pitch + 15 mm
+    rim, square corners), the disc top within the disc (+1 cm), else the table. From the located tray grid and disc
+    (calibration/*.json)."""
+
+    def __init__(self, grid: dict, disc: dict | None, cfg: dict):
+        import cv2
+
+        self.tray_top = float(grid["z_top"])
+        self.table_z = float(grid.get("table_z", self.tray_top - 0.08))
+        (cx, cy), (w, h), ang = cv2.minAreaRect(np.array([v[:2] for v in grid["cells"].values()], np.float32))
+        a = np.radians(ang)
+        self.c, self.R = np.array([cx, cy]), np.array([[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]])
+        edge = float(cfg["tray"]["model"]["pitch_m"]) / 2 + 0.015
+        self.half = np.array([w / 2 + edge, h / 2 + edge])
+        ok = disc is not None and disc.get("ok", True) and "centre" in disc
+        self.disc_top = float(disc["z_top"]) if ok else None
+        self.disc_c = np.array(disc["centre"][:2]) if ok else None
+        self.disc_r = 0.085 + 0.01
+
+    def under(self, P: np.ndarray, reach: float = 0.0) -> np.ndarray:
+        """the highest surface within `reach` (horizontally) of each point"""
+        P = np.atleast_2d(P)[:, :2]
+        uv = (P - self.c) @ self.R  # tray axes
+        f = np.where((np.abs(uv) <= self.half + reach).all(axis=1), self.tray_top, self.table_z)
+        if self.disc_c is not None:
+            f = np.where(np.hypot(*(P - self.disc_c).T) < self.disc_r + reach, np.maximum(f, self.disc_top), f)
+        return f
+
+
 def lowest_body_z(q: np.ndarray, T_FC: np.ndarray, cfg: dict) -> tuple[float, str]:
     best = (np.inf, "")
     for name, P in body_points_B(q, T_FC, cfg).items():
@@ -157,6 +187,10 @@ def plan_observation(target_B: np.ndarray, q_now: np.ndarray, T_FC: np.ndarray, 
                 z, part = path_clearance(q_now, q, T_FC, cfg)
                 if z < floor:
                     tried.append((desc, f"{part} would go down to z={z:.3f} m"))
+                    continue
+                sc = path_self_clearance(q_now, q, T_FC, cfg)
+                if sc < float(o.get("min_self_clearance_m", 0.09)):  # Franka's self-collision reflex (see self_clearance)
+                    tried.append((desc, f"hand {sc * 1000:.0f} mm from the arm itself"))
                     continue
                 if best is not None:
                     tried.append((best[1].desc, f"valid, replaced by a smaller joint change ({best[1].max_joint_step_deg:.0f} deg)"))

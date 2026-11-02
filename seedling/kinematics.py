@@ -6,6 +6,8 @@ any motion is sent.
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from scipy.spatial.transform import Rotation
 
@@ -43,16 +45,29 @@ DEFAULT_F_T_EE = make_T(Rotation.from_euler("z", -np.pi / 4).as_matrix(), [0.0, 
 
 
 def _dh(a: float, d: float, alpha: float, theta: float) -> np.ndarray:
-    ca, sa = np.cos(alpha), np.sin(alpha)
-    ct, st = np.cos(theta), np.sin(theta)
-    return np.array(
-        [
-            [ct, -st, 0.0, a],
-            [st * ca, ct * ca, -sa, -d * sa],
-            [st * sa, ct * sa, ca, d * ca],
-            [0.0, 0.0, 0.0, 1.0],
-        ]
-    )
+    ca, sa = math.cos(alpha), math.sin(alpha)
+    ct, st = math.cos(theta), math.sin(theta)
+    T = np.empty((4, 4))
+    T[0] = ct, -st, 0.0, a
+    T[1] = st * ca, ct * ca, -sa, -d * sa
+    T[2] = st * sa, ct * sa, ca, d * ca
+    T[3] = 0.0, 0.0, 0.0, 1.0
+    return T
+
+
+def _cross(u: np.ndarray, v: np.ndarray) -> np.ndarray:
+    """3-vector cross product (np.cross costs ~15 us per call: most of the IK time)"""
+    return np.array([u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]])
+
+
+def _rotvec(R: np.ndarray) -> np.ndarray:
+    """Rotation vector of a rotation matrix (scipy's Rotation for angles near 180 deg, where this formula is unstable)."""
+    c = (R[0, 0] + R[1, 1] + R[2, 2] - 1.0) / 2.0
+    w = np.array([R[2, 1] - R[1, 2], R[0, 2] - R[2, 0], R[1, 0] - R[0, 1]])
+    if c < -0.9:
+        return Rotation.from_matrix(R).as_rotvec()
+    sn = 0.5 * math.sqrt(float(w @ w))  # sin(angle)
+    return 0.5 * w if sn < 1e-12 else w * (math.atan2(sn, c) / (2.0 * sn))
 
 
 def fk_flange(q: np.ndarray, offsets: np.ndarray | None = None) -> np.ndarray:
@@ -86,7 +101,7 @@ def _jacobian(q: np.ndarray, target: np.ndarray, F_T_EE: np.ndarray, rot_weight:
     Rt = target[:3, :3].T
     for i, Fi in enumerate(frames):
         z = Fi[:3, 2]
-        J[:3, i] = np.cross(z, pe - Fi[:3, 3])
+        J[:3, i] = _cross(z, pe - Fi[:3, 3])
         J[3:, i] = rot_weight * (Rt @ z)
     return J
 
@@ -94,7 +109,7 @@ def _jacobian(q: np.ndarray, target: np.ndarray, F_T_EE: np.ndarray, rot_weight:
 def _residual(q: np.ndarray, target: np.ndarray, F_T_EE: np.ndarray, rot_weight: float) -> np.ndarray:
     T = fk(q, F_T_EE)
     dp = T[:3, 3] - target[:3, 3]
-    dr = Rotation.from_matrix(target[:3, :3].T @ T[:3, :3]).as_rotvec()
+    dr = _rotvec(target[:3, :3].T @ T[:3, :3])
     return np.concatenate([dp, rot_weight * dr])
 
 

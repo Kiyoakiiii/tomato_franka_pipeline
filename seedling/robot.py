@@ -74,7 +74,7 @@ class RobotBase:
             self.confirm_fn(description)
 
     # ---- motions ---------------------------------------------------------------------------
-    def move_to_pose(self, T_BE: np.ndarray, dynamics: float | None = None, force_limit_n: float | None = None,
+    def move_to_pose(self, T_BE: np.ndarray, dynamics=None, force_limit_n: float | None = None,
                      description: str = "move") -> MotionResult:
         raise NotImplementedError
 
@@ -82,7 +82,7 @@ class RobotBase:
         """Move so that the gripper contact frame G reaches T_BG."""
         return self.move_to_pose(T_BG @ np.linalg.inv(self.T_EG), **kw)
 
-    def move_joints(self, q: np.ndarray, dynamics: float | None = None, description: str = "joint move") -> MotionResult:
+    def move_joints(self, q: np.ndarray, dynamics=None, description: str = "joint move") -> MotionResult:
         raise NotImplementedError
 
     def has_errors(self) -> bool:
@@ -119,8 +119,13 @@ class FrankyRobot(RobotBase):
 
     MAX_DYNAMICS = 0.2  # hard cap on any motion's relative speed/acceleration/jerk
 
-    def _dyn(self, dynamics: float | None) -> float:
-        return min(float(dynamics if dynamics is not None else self.rcfg["dynamics"]), self.MAX_DYNAMICS)
+    def _dyn(self, dynamics):
+        """None: robot.dynamics, "fine": robot.fine_dynamics, else the caller's value. A value is one factor for
+        velocity, acceleration and jerk, or [velocity, acceleration, jerk]: long moves are limited by the velocity,
+        so that can go up while the jerk stays low (0.06 for all three gave one acceleration-discontinuity reflex)."""
+        d = self.rcfg["dynamics"] if dynamics is None else self.rcfg["fine_dynamics"] if isinstance(dynamics, str) else dynamics
+        v, a, j = (min(float(x), self.MAX_DYNAMICS) for x in ((d, d, d) if np.isscalar(d) else d))
+        return self.fr.RelativeDynamicsFactor(v, a, j)
 
     def _check_ee_frame(self) -> None:
         """Warn when Desk's EE frame disagrees with the configured flange_to_ee (FK vs reported pose)."""
@@ -161,10 +166,12 @@ class FrankyRobot(RobotBase):
             motion.add_reaction(reaction)
         t0 = time.time()
         peak = 0.0
+        self.trace = [self.q()]  # joints during the motion (~10 ms apart), to compare with the planned path
         try:
             self.robot.move(motion, asynchronous=True)
             while not self.robot.join_motion(timeout=0.01):
                 peak = max(peak, float(np.linalg.norm(self.external_force() - f0)))
+                self.trace.append(self.q())
         except fr.ControlException as exc:
             return MotionResult(False, f"control_exception: {exc}", triggered["v"], peak, time.time() - t0)
         except fr.CommandException as exc:
@@ -189,8 +196,19 @@ class FrankyRobot(RobotBase):
         self._validate(kinematics.fk(q, self.F_T_EE), check_ik=False)
         self.confirm(f"{description}: q -> {np.round(q, 3).tolist()}")
         d = self._dyn(dynamics)
+        q0 = self.q()
         motion = self.fr.JointMotion(q, relative_dynamics_factor=d)
-        return self._run(motion, None, self.external_force())
+        r = self._run(motion, None, self.external_force())
+        # the checks before every move assume the straight joint path q0 -> q (franky's time-synchronised profiles
+        # stay within ~0.6 deg of it in simulation): how far the real motion left it
+        dq = q - q0
+        if len(self.trace) > 2 and float(dq @ dq) > 1e-8:
+            Q = np.array(self.trace) - q0
+            s = np.clip(Q @ dq / float(dq @ dq), 0.0, 1.0)
+            r.extra["off_straight_deg"] = float(np.degrees(np.abs(Q - np.outer(s, dq)).max()))
+            if r.extra["off_straight_deg"] > 2.0:
+                print(f"[robot] WARNING: {description}: the joints left the planned straight path by {r.extra['off_straight_deg']:.1f} deg")
+        return r
 
     def close(self) -> None:
         try:
