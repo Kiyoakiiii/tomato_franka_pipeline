@@ -46,6 +46,7 @@ def main() -> int:
     ap.add_argument("--wrist-reach-mm", type=float, default=80.0, help="the wrist housings reach this far sideways: the surface "
                     "within it counts as under them (the joint 5/6 housing hit the tray's edge from 80 mm beside it)")
     ap.add_argument("--camera-clearance-mm", type=float, default=20.0)
+    ap.add_argument("--self-clearance-mm", type=float, default=90.0, help="hand from the arm's own upper arm and forearm (see 65)")
     ap.add_argument("--dynamics", type=float, default=0.05)
     args = ap.parse_args()
     cfg = config_from_args(args)
@@ -55,7 +56,7 @@ def main() -> int:
     from seedling.config import ee_to_contact, flange_to_ee
     from seedling.robot import FrankyRobot
     from seedling.transforms import inv_T, make_T
-    from seedling.wrist import body_points_B
+    from seedling.wrist import body_points_B, path_self_clearance
 
     T_FC, _ = load_T_FC(cfg)
     F, G = flange_to_ee(cfg), ee_to_contact(cfg)
@@ -205,6 +206,9 @@ def main() -> int:
                 lg_check = float(G_of(q)[2, 3]) if name == "up" else lg
                 if name in ("up", "across") and lg_check - below < top + 0.02:
                     bad.append("plug bottom")
+                sc = path_self_clearance(prev, q, T_FC, cfg)
+                if sc < args.self_clearance_mm / 1000:
+                    bad.append(f"hand {sc * 1000:.0f} mm from the arm itself")
                 ok &= not bad
                 lines.append(f"  {name:9s}: max joint change {np.degrees(np.abs(q - prev)).max():5.1f} deg; clearance wrist/flange {cw * 1000:.0f} mm, "
                              f"camera {cc * 1000:.0f} mm over what lies below; grasp centre down to {lg:.3f}" + (f"  <-- TOO LOW {bad}" if bad else ""))

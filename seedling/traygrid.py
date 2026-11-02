@@ -247,9 +247,12 @@ def locate_tray(frame: Frame, T_BC: np.ndarray, cfg: dict, prior: dict | None = 
 
     seen, off, above = check_cells(cells)
     shifted = None
-    if prior is None and len(off) >= 2:
+    if prior is None and (len(off) >= 2 or seen < len(cells)):
         # the cell pattern repeats: the match can be whole cells off along a line (seen with the tray's far end
-        # hanging over the table). Whole-cell shifts are tried; the one with no cell off the tray wins
+        # hanging over the table). Whole-cell shifts are tried; the one with no cell off the tray wins. Also when
+        # cells have no depth: one cell along the long side off (2026-11-02, a person beside the tray, so no
+        # outline cross-check) put the last row just past the tray end, where the rim within 20 mm hid that it
+        # stands on nothing; 68 of 72 cells were seen, the right fit sees all
         best = (len(off), len(above), -seen, 0), (0, 0), (seen, off, above), cells
         for a in range(-3, 4):
             for b in range(-2, 3):
@@ -261,7 +264,7 @@ def locate_tray(frame: Frame, T_BC: np.ndarray, cfg: dict, prior: dict | None = 
                 key = (len(r[1]), len(r[2]), -r[0], abs(a) + abs(b))
                 if key < best[0]:
                     best = key, (a, b), r, cl
-        if best[1] != (0, 0) and len(best[2][1]) < len(off):
+        if best[1] != (0, 0):
             shifted = best[1]
             seen, off, above = best[2]
             cells = best[3]

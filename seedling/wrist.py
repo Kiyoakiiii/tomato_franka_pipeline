@@ -40,6 +40,28 @@ def body_points_B(q: np.ndarray, T_FC: np.ndarray, cfg: dict) -> dict[str, np.nd
     return pts
 
 
+def self_clearance(q: np.ndarray, T_FC: np.ndarray, cfg: dict) -> float:
+    """Smallest distance from the hand (flange, camera housing, gripper contact point) to the axes of the arm's base,
+    upper arm and forearm. Franka's self-collision reflex stopped two moves ending at 69 mm (2026-11-02, D4/D3:
+    the wrist folded back onto the forearm, joint 4 at -2.85); the poses that ran fine had 100 mm or more. At most
+    ~139 mm (the flange's fixed distance from the wrist joint, where the forearm axis ends): only a folded wrist is less."""
+    frames, _ = kinematics._frames(np.asarray(q, float), flange_to_ee(cfg))
+    P = [np.zeros(3)] + [f[:3, 3] for f in frames]
+    pts = body_points_B(q, T_FC, cfg)
+    hand = np.vstack([pts[k] for k in ("flange", "camera housing", "gripper contact point") if k in pts])
+    d = np.inf
+    for a, b in ((P[0], P[2]), (P[2], P[4]), (P[4], P[5])):  # base -> shoulder, upper arm, forearm (elbow -> wrist)
+        ab = b - a
+        t = np.clip(((hand - a) @ ab) / max(float(ab @ ab), 1e-12), 0.0, 1.0)[:, None]
+        d = min(d, float(np.linalg.norm(hand - (a + t * ab), axis=1).min()))
+    return d
+
+
+def path_self_clearance(qa: np.ndarray, qb: np.ndarray, T_FC: np.ndarray, cfg: dict, n: int = 21) -> float:
+    """self_clearance along the straight joint path qa -> qb (what move_joints executes)."""
+    return min(self_clearance(qa + s * (qb - qa), T_FC, cfg) for s in np.linspace(0.0, 1.0, n))
+
+
 def lowest_body_z(q: np.ndarray, T_FC: np.ndarray, cfg: dict) -> tuple[float, str]:
     best = (np.inf, "")
     for name, P in body_points_B(q, T_FC, cfg).items():

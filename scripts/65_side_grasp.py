@@ -60,6 +60,8 @@ def main() -> int:
                     help="approach headings tried in turn, relative to straight out from the robot (first free and safe one wins)")
     ap.add_argument("--stage-up-mm", type=float, default=120.0, help="turn the gripper at this height above the pre-grasp, then go down")
     ap.add_argument("--transit-clearance-mm", type=float, default=120.0, help="grasp centre above the tray top while turning (over the plants)")
+    ap.add_argument("--self-clearance-mm", type=float, default=90.0, help="hand (flange, camera, gripper) from the arm's own upper arm and "
+                    "forearm axes on every move: Franka's self-collision reflex stopped moves at 69 mm (2026-11-02)")
     ap.add_argument("--lift-mm", type=float, default=20.0)
     ap.add_argument("--dx-mm", type=float, default=0.0, help="nudge: horizontal, along the approach")
     ap.add_argument("--dy-mm", type=float, default=0.0, help="nudge: along the closing axis")
@@ -75,7 +77,7 @@ def main() -> int:
     from seedling.config import ee_to_contact, flange_to_ee
     from seedling.robot import FrankyRobot
     from seedling.transforms import inv_T, make_T
-    from seedling.wrist import body_points_B
+    from seedling.wrist import body_points_B, path_self_clearance
 
     T_FC, _ = load_T_FC(cfg)
     F, G = flange_to_ee(cfg), ee_to_contact(cfg)
@@ -116,6 +118,9 @@ def main() -> int:
             bad.append(f"camera {lows['camera']:.3f}")
         if gripper_floor is not None and lows["gripper"] < gripper_floor:
             bad.append(f"grasp centre {lows['gripper']:.3f}")
+        lows["self"] = path_self_clearance(qa, qb, T_FC, cfg)
+        if lows["self"] < args.self_clearance_mm / 1000:
+            bad.append(f"hand {lows['self'] * 1000:.0f} mm from the arm itself")
         step = float(np.degrees(np.abs(qb - qa)).max())
         return step, lows, dev, bad
 
@@ -123,7 +128,8 @@ def main() -> int:
         step, lows, dev, bad = check(qa, qb, gripper_floor=gripper_floor)
         print(f"  {name:10s}: max joint change {step:5.1f} deg; lowest wrist/flange {lows['wrist']:.3f}, camera {lows['camera']:.3f}, "
               f"grasp centre {lows['gripper']:.3f} "
-              f"(tray top {tray_top:.3f}); grasp centre off the straight line {dev * 1000:4.1f} mm" + (f"  <-- TOO LOW {bad}" if bad else ""))
+              f"(tray top {tray_top:.3f}); grasp centre off the straight line {dev * 1000:4.1f} mm; hand from the arm itself "
+              f"{lows['self'] * 1000:.0f} mm" + (f"  <-- NOT SAFE {bad}" if bad else ""))
         return not bad
 
     def move(q_target, dyn, name):
@@ -368,22 +374,40 @@ def main() -> int:
             pre = grasp - a * args.standoff_mm / 1000.0
             lift = grasp + [0, 0, args.lift_mm / 1000.0]
             stage = pre + [0, 0, args.stage_up_mm / 1000.0]
-            q_st = ik(make_T(R, stage), q_now)
-            if q_st is None:  # far from the current joints: any solution, then the rest near it
-                q_st = kinematics.solve_ik(make_T(R, stage) @ inv_T(G), q_now, F, margin)
-            q_pre = ik(make_T(R, pre), q_st) if q_st is not None else None
-            q_gr = ik(make_T(R, grasp), q_pre) if q_pre is not None else None
-            q_li = ik(make_T(R, lift), q_gr) if q_gr is not None else None
-            if q_li is None:
+            floor_g = tray_top + args.transit_clearance_mm / 1000.0
+            # the stage pose: the solution near the current joints first, then other IK branches (one far branch
+            # folded the wrist back onto the forearm: self-collision reflex, 2026-11-02); the rest near the stage
+            T_st, branches, found = make_T(R, stage) @ inv_T(G), [], False
+            for k in range(6):
+                if k == 0:
+                    q_st = ik(make_T(R, stage), q_now)
+                else:
+                    start = q_now if k == 1 else np.random.default_rng(k).uniform(kinematics.Q_MIN, kinematics.Q_MAX)
+                    q_st = kinematics.solve_ik(T_st, start, F, margin, n_random_seeds=8, rng_seed=k)
+                    if q_st is not None and (np.linalg.norm(G_of(q_st)[:3, 3] - stage) > 0.0015
+                                             or any(np.abs(q_st - b).max() < 0.05 for b in branches)):
+                        q_st = None  # off target, or a branch already tried
+                if q_st is None:
+                    continue
+                branches.append(q_st)
+                q_pre = ik(make_T(R, pre), q_st)
+                q_gr = ik(make_T(R, grasp), q_pre) if q_pre is not None else None
+                q_li = ik(make_T(R, lift), q_gr) if q_gr is not None else None
+                if q_li is None:
+                    continue
+                found = True
+                near = float(np.degrees(np.abs(q_st - q_now)).max()) < 5.0
+                print(f"  heading {dyaw:+.0f} deg from straight out" + (f" (IK branch {len(branches)})" if len(branches) > 1 else "") + ":")
+                ok = (True if near else report("to stage", q_now, q_st, gripper_floor=floor_g)) & report("down", q_st, q_pre) \
+                    & report("approach", q_pre, q_gr) & report("lift", q_gr, q_li) & report("retreat", q_li, q_pre)
+                if chosen is None or ok:
+                    chosen = (dyaw, a, across, R, close_pt, q_st, q_pre, q_gr, q_li, ok)
+                if ok:
+                    break
+            if not found:
                 print(f"  heading {dyaw:+.0f} deg: not reachable")
                 continue
-            floor_g = tray_top + args.transit_clearance_mm / 1000.0
-            near = float(np.degrees(np.abs(q_st - q_now)).max()) < 5.0
-            print(f"  heading {dyaw:+.0f} deg from straight out:")
-            ok = (True if near else report("to stage", q_now, q_st, gripper_floor=floor_g)) & report("down", q_st, q_pre) \
-                & report("approach", q_pre, q_gr) & report("lift", q_gr, q_li) & report("retreat", q_li, q_pre)
-            chosen = (dyaw, a, across, R, close_pt, q_st, q_pre, q_gr, q_li, ok)
-            if ok:
+            if chosen[-1]:
                 break
         if chosen is None:
             print("not reachable from any heading without going through other plants")

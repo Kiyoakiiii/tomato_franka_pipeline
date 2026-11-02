@@ -28,7 +28,7 @@ def main() -> int:
     from seedling.config import ee_to_contact, flange_to_ee
     from seedling.robot import FrankyRobot
     from seedling.transforms import inv_T
-    from seedling.wrist import body_points_B
+    from seedling.wrist import body_points_B, path_self_clearance
 
     T_FC, _ = load_T_FC(cfg)
     F, G = flange_to_ee(cfg), ee_to_contact(cfg)
@@ -81,9 +81,11 @@ def main() -> int:
     for name, qa, qb in steps:
         m, part = lowest(qa, qb)
         floor = min(args.min_z, float(lowest(qa, qa, 1)[0]) - 1e-3) if name == "lift in place" else min_z_on
-        bad = m < floor
+        sc = path_self_clearance(qa, qb, T_FC, cfg)
+        bad = m < floor or sc < 0.090  # hand from the arm itself: see --self-clearance-mm of 65
         ok &= not bad
-        print(f"{name}: max joint change {np.degrees(np.abs(qb - qa)).max():.0f} deg, lowest {part} z={m:.3f}" + ("  <-- TOO LOW" if bad else ""))
+        print(f"{name}: max joint change {np.degrees(np.abs(qb - qa)).max():.0f} deg, lowest {part} z={m:.3f}, hand from the arm itself "
+              f"{sc * 1000:.0f} mm" + ("  <-- NOT SAFE" if bad else ""))
     if args.dry_run or not ok:
         return 0 if ok else 1
     for name, qa, qb in steps:
