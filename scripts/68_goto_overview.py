@@ -47,10 +47,11 @@ def main() -> int:
     steps = []
     T = kinematics.fk(q0, F) @ G
     q = q0
-    if T[2, 3] < args.up_to:
-        # straight up as high as the arm allows (near the tray's far side the full lift may be out of reach)
+    if T[2, 3] < args.up_to - 0.01:
+        # straight up as high as the arm allows (near the tray's far side the full lift may be out of reach), at
+        # least 1 cm (the range was empty when the arm was less than 5 cm below --up-to, e.g. at an observation pose)
         q1 = None
-        for zt in np.arange(args.up_to, T[2, 3] + 0.05, -0.02):
+        for zt in np.arange(args.up_to, T[2, 3] + 0.01, -0.02):
             T1 = T.copy()
             T1[2, 3] = zt
             q1 = kinematics.solve_ik_near(T1 @ inv_T(G), q0, F, float(cfg["robot"]["ik_joint_margin_rad"]))

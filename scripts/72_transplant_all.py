@@ -151,7 +151,7 @@ def main() -> int:
         if done >= args.max_plants:
             print(f"{done} plants done (--max-plants)")
             break
-        chosen = None
+        chosen, no_place = None, []
         for k in todo:
             obs = grasp_dir / f"{k}_observe.json"
             if obs.exists():
@@ -170,6 +170,7 @@ def main() -> int:
             if rp != 0:
                 why = [ln for ln in op.splitlines() if ln.strip()]
                 print(f"  {k}: grasp ok, no safe placement ({why[-1].strip() if why else 'refused'})")
+                no_place.append(k)
                 continue
             hole = json.loads((grasp_dir / f"{k}_place_plan.json").read_text())["hole"]
             head = [ln for ln in og.splitlines() if "heading" in ln and "from straight out" in ln]
@@ -178,6 +179,9 @@ def main() -> int:
             break
         if chosen is None:
             print("no plant left that can be grasped and placed safely: stopped")
+            if no_place:
+                print(f"({len(no_place)} could be grasped but no free hole reached: the disc may be too close to the robot; "
+                      "about 0.65 m from the base worked on 2026-10-28)")
             break
         k, hole, head = chosen
         log["rounds"].append({"cell": k, "hole": hole, "free_before": free})

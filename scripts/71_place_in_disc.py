@@ -143,6 +143,7 @@ def main() -> int:
 
         def plan_hole(hi):
             hxy = holes[hi]
+            tried = []
             steps = [("up", make_T(R0, np.array([lift_stem[0], lift_stem[1], max(z_t, lift_stem[2])]) - R0[:, 2] * fwd)),
                      ("across", pose(hxy, max(z_t, z_above)))]
             if z_t > z_above + 1e-3:
@@ -152,18 +153,35 @@ def main() -> int:
             ah_h = np.array([ah[0], ah[1], 0.0]) / np.linalg.norm(ah[:2])
             T_back = make_T(Rh, steps[-1][1][:3, 3] - ah_h * args.back_mm / 1000)
             steps += [("back", T_back), ("up after", make_T(Rh, T_back[:3, 3] + [0, 0, args.up_mm / 1000]))]
-            qs, seed = {}, q_lift
-            for name, T in steps:
-                q = ik(T, seed)
-                if q is None and name == "across":
-                    # a long move from the grasp heading to the hole's: no solution near the seed, take any (the joint
-                    # path to it is checked below like every other)
-                    q = kinematics.solve_ik(T @ inv_T(G), seed, F, margin)
-                    if q is not None and np.linalg.norm(G_of(q)[:3, 3] - T[:3, 3]) > 0.0015:
-                        q = None
+            # "across" is a long move from the grasp heading to the hole's: besides the solution near the seed, other
+            # IK branches are tried, since the short moves after it (down, back) can be out of reach from one branch
+            # and fine from another; the first branch whose whole chain is reachable and clear is taken
+            fail = None
+            for k in range(7):
+                qs, seed = {}, q_lift
+                for name, T in steps:
+                    if name == "across" and k > 0:
+                        start = np.random.default_rng(k).uniform(kinematics.Q_MIN, kinematics.Q_MAX)  # a different branch each try
+                        q = kinematics.solve_ik(T @ inv_T(G), start, F, margin, n_random_seeds=8, rng_seed=k)
+                        if q is not None and (np.linalg.norm(G_of(q)[:3, 3] - T[:3, 3]) > 0.0015
+                                              or any(np.abs(q - o["across"]).max() < 0.05 for o in tried)):
+                            q = None  # off target, or a branch already tried
+                    else:
+                        q = ik(T, seed)
+                    if q is None:
+                        break
+                    qs[name], seed = q, q
                 if q is None:
-                    return None, [f"H{hi + 1}: not reachable ({name})"]
-                qs[name], seed = q, q
+                    fail = fail or [f"H{hi + 1}: not reachable ({name})"]
+                    continue
+                tried.append(qs)
+                ok, lines = check(qs, steps)
+                if ok:
+                    return qs, lines
+                fail = lines
+            return None, fail
+
+        def check(qs, steps):
             # along every joint path: wrist/flange and camera clear of what lies under them (the tray top over the
             # tray, the disc top over the disc, else the table); the held plug's bottom above the tops while carrying
             ok, prev, lines = True, q_lift, []
@@ -191,29 +209,35 @@ def main() -> int:
                 lines.append(f"  {name:9s}: max joint change {np.degrees(np.abs(q - prev)).max():5.1f} deg; clearance wrist/flange {cw * 1000:.0f} mm, "
                              f"camera {cc * 1000:.0f} mm over what lies below; grasp centre down to {lg:.3f}" + (f"  <-- TOO LOW {bad}" if bad else ""))
                 prev = q
-            return (qs if ok else None), lines
+            return ok, lines
 
         free = [int(h) for h in args.free.split(",")] if args.free else disc.get("free_holes", list(range(1, len(holes) + 1)))
         if args.hole and args.hole not in free:
             print(f"refused: H{args.hole} is taken (a plug in it on the last overview); free: {free}")
             return 1
-        order = [args.hole - 1] if args.hole else [i for i in np.argsort(np.hypot(holes[:, 0], holes[:, 1])) if i + 1 in free]  # nearest the robot first
+        # nearest the robot first; --hole is tried first, and when it cannot be reached now (the grasp measured after the
+        # first plan can change the carry pose by a few mm, enough at a joint limit) the other free holes follow
+        order = [i for i in np.argsort(np.hypot(holes[:, 0], holes[:, 1])) if i + 1 in free]
+        if args.hole:
+            order = [args.hole - 1] + [i for i in order if i != args.hole - 1]
         if not order:
             print("no free hole left in the disc")
             return 1
         qs = None
         for hi in order:
             qs, lines = plan_hole(int(hi))
-            if qs is not None or args.hole:
+            if qs is not None:
                 break
             print(lines[-1] if len(lines) == 1 else f"H{hi + 1}: unsafe path, next hole")
         for ln in lines:
             print(ln)
         if qs is None:
-            print("no hole of the disc can be reached safely" if not args.hole else f"H{args.hole} cannot be reached safely")
+            print("no free hole of the disc can be reached safely")
             place_file.write_text(json.dumps({"cell": args.cell, "safe": False}))
             return 1
         hi = int(hi)
+        if args.hole and hi + 1 != args.hole:
+            print(f"H{args.hole} cannot be reached now: H{hi + 1} instead")
         print(f"hole H{hi + 1} at {np.round(holes[hi], 4).tolist()}, disc top {disc_top:.3f}; plug bottom {below * 1000:.0f} mm below the held stem; "
               f"carried at plug bottom {(z_t - below - top) * 1000:.0f} mm above the tops, let go with it {args.insert_mm:.0f} mm in the hole, "
               f"finger bottom {(fingers - disc_top) * 1000:.0f} mm above the disc")
