@@ -45,8 +45,12 @@ def main() -> int:
     ap.add_argument("--wrist-clearance-mm", type=float, default=None, help="default grasp.side_wrist_clearance_mm (as for the grasp)")
     ap.add_argument("--headings-deg", type=float, nargs="+", default=[0, -15, 15, -30, 30, -45, 45, -60, 60],
                     help="hand headings over the hole, relative to straight out from the robot, tried in turn")
+    ap.add_argument("--wrist-clearance-off-tray-mm", type=float, default=None,
+                    help="the same away from the tray (over the disc and the table): default grasp.side_wrist_clearance_off_tray_mm")
     ap.add_argument("--wrist-reach-mm", type=float, default=80.0, help="the wrist housings reach this far sideways: the surface "
                     "within it counts as under them (the joint 5/6 housing hit the tray's edge from 80 mm beside it)")
+    ap.add_argument("--ik-tries", type=int, default=40, help="IK solutions of the across pose collected (random starts)")
+    ap.add_argument("--max-branches", type=int, default=8, help="of those, how many are tried (clear of the arm first)")
     ap.add_argument("--camera-clearance-mm", type=float, default=20.0)
     ap.add_argument("--self-clearance-mm", type=float, default=90.0, help="hand from the arm's own upper arm and forearm (see 65)")
     ap.add_argument("--dynamics", type=float, default=None, help="one factor for all moves (default: robot.dynamics / fine_dynamics in the config)")
@@ -55,13 +59,18 @@ def main() -> int:
     fine = "fine" if args.dynamics is None else min(args.dynamics, 0.03)
     if args.wrist_clearance_mm is None:
         args.wrist_clearance_mm = float(cfg["grasp"].get("side_wrist_clearance_mm", 70.0))
+    if args.wrist_clearance_off_tray_mm is None:
+        args.wrist_clearance_off_tray_mm = float(cfg["grasp"].get("side_wrist_clearance_off_tray_mm", 70.0))
+    # the wrist housings are ~6 cm in radius around the checked joint centres: over the tray the user's own setting
+    # (tested by hand), over the disc and the table the full clearance
+    extra_off = max(0.0, args.wrist_clearance_off_tray_mm - args.wrist_clearance_mm) / 1000
 
     from seedling import kinematics
     from seedling.calibration import load_T_FC
     from seedling.config import ee_to_contact, flange_to_ee
     from seedling.robot import FrankyRobot
     from seedling.transforms import inv_T, make_T
-    from seedling.wrist import Surfaces, body_points_B, path_self_clearance
+    from seedling.wrist import Surfaces, body_points_B, path_self_clearance, self_clearance
 
     T_FC, _ = load_T_FC(cfg)
     F, G = flange_to_ee(cfg), ee_to_contact(cfg)
@@ -132,7 +141,6 @@ def main() -> int:
 
         def plan_hole(hi, dyaw):
             hxy = holes[hi]
-            tried = []
             steps = [("up", make_T(R0, np.array([lift_stem[0], lift_stem[1], max(z_t, lift_stem[2])]) - R0[:, 2] * fwd)),
                      ("across", pose(hxy, max(z_t, z_above), dyaw))]
             if z_t > z_above + 1e-3:
@@ -142,32 +150,53 @@ def main() -> int:
             ah_h = np.array([ah[0], ah[1], 0.0]) / np.linalg.norm(ah[:2])
             T_back = make_T(Rh, steps[-1][1][:3, 3] - ah_h * args.back_mm / 1000)
             steps += [("back", T_back), ("up after", make_T(Rh, T_back[:3, 3] + [0, 0, args.up_mm / 1000]))]
-            # "across" is a long move from the grasp heading to the hole's: besides the solution near the seed, other
-            # IK branches are tried, since the short moves after it (down, back) can be out of reach from one branch
-            # and fine from another; the first branch whose whole chain is reachable and clear is taken
-            fail = None
-            for k in range(7):
-                qs, seed = {}, q_lift
-                for name, T in steps:
-                    if name == "across" and k > 0:
-                        start = np.random.default_rng(k).uniform(kinematics.Q_MIN, kinematics.Q_MAX)  # a different branch each try
-                        q = kinematics.solve_ik(T @ inv_T(G), start, F, margin, n_random_seeds=8, rng_seed=k)
-                        if q is not None and (np.linalg.norm(G_of(q)[:3, 3] - T[:3, 3]) > 0.0015
-                                              or any(np.abs(q - o["across"]).max() < 0.05 for o in tried)):
-                            q = None  # off target, or a branch already tried
-                    else:
-                        q = ik(T, seed)
+            # "across" is a long move from the grasp heading to the hole's. A flat hand high above a disc close to the
+            # robot folds the wrist back towards the forearm in most joint solutions (7 joints: many solutions per
+            # pose), as for the grasp (65): --ik-tries solutions of the across pose are collected, those with the hand
+            # clear of the arm first (the one near the lift pose first among them, then the least joint change: a big
+            # wrist roll strains the camera cable);
+            # the short moves after it are solved near it. When only the across move itself fails (its straight joint
+            # path sweeps the camera past the forearm or dips the plug), it goes through a via pose: the wrist joints
+            # 5-7 turned first, or last
+            q_up = ik(steps[0][1], q_lift)
+            if q_up is None:
+                return None, [f"H{hi + 1}: not reachable (up)"]
+            T_ac = steps[1][1]
+            sc_min = args.self_clearance_mm / 1000
+            cands = []
+            for k in range(args.ik_tries + 2):
+                if k == 0:
+                    q = ik(T_ac, q_up)
+                else:
+                    start = q_up if k == 1 else np.random.default_rng(k).uniform(kinematics.Q_MIN, kinematics.Q_MAX)
+                    q = kinematics.solve_ik(T_ac @ inv_T(G), start, F, margin, n_random_seeds=0 if k > 1 else 4, rng_seed=k)
+                    if q is not None and np.linalg.norm(G_of(q)[:3, 3] - T_ac[:3, 3]) > 0.0015:
+                        q = None
+                if q is not None and not any(np.abs(q - c_[3]).max() < 0.05 for c_ in cands):
+                    cands.append((self_clearance(q, T_FC, cfg) < sc_min, k != 0, float(np.abs(q - q_up).max()), q))
+            cands.sort(key=lambda c_: c_[:3])
+            fail = None if cands else [f"H{hi + 1}: not reachable (across)"]
+            for *_, q_ac in cands[:args.max_branches]:
+                qs, seed, q = {"up": q_up, "across": q_ac}, q_ac, q_ac
+                for name, T in steps[2:]:
+                    q = ik(T, seed)
                     if q is None:
                         break
                     qs[name], seed = q, q
                 if q is None:
                     fail = fail or [f"H{hi + 1}: not reachable ({name})"]
                     continue
-                tried.append(qs)
                 ok, lines = check(qs, steps)
                 if ok:
                     return qs, lines
                 fail = lines
+                if any("TOO LOW" in ln for ln in lines if not ln.lstrip().startswith("across")):
+                    continue  # a via pose only changes the across move
+                for qv in (np.r_[q_up[:4], q_ac[4:]], np.r_[q_ac[:4], q_up[4:]]):
+                    steps_v = steps[:1] + [("via", None)] + steps[1:]
+                    ok, lines_v = check({**qs, "via": qv}, steps_v)
+                    if ok:
+                        return {**qs, "via": qv}, lines_v
             return None, fail
 
         def check(qs, steps):
@@ -181,7 +210,7 @@ def main() -> int:
                     qq = prev + t * (q - prev)
                     pts = body_points_B(qq, T_FC, cfg)
                     wr = np.vstack([pts["wrist joints"], pts["flange"]])
-                    cw = min(cw, float((wr[:, 2] - floor_at(wr, args.wrist_reach_mm / 1000)).min()))
+                    cw = min(cw, float((wr[:, 2] - floor_at(wr, args.wrist_reach_mm / 1000, extra_off)).min()))
                     cm = pts["camera housing"]
                     cc = min(cc, float((cm[:, 2] - floor_at(cm)).min()))
                     lg = min(lg, float(G_of(qq)[2, 3]))
@@ -192,7 +221,7 @@ def main() -> int:
                     bad.append("camera")
                 # the plug starts low at the lift pose: on the way up only where it ends counts
                 lg_check = float(G_of(q)[2, 3]) if name == "up" else lg
-                if name in ("up", "across") and lg_check - below < top + 0.02:
+                if name in ("up", "via", "across") and lg_check - below < top + 0.02:
                     bad.append("plug bottom")
                 sc = path_self_clearance(prev, q, T_FC, cfg)
                 if sc < args.self_clearance_mm / 1000:
@@ -219,13 +248,18 @@ def main() -> int:
         # own stem, it stays upright). A flat hand straight out is at joint 6's limit, as when grasping
         qs = None
         for hi in order:
+            why = []  # per heading: the first move that failed and the check (or where the IK ran out)
             for dyaw in args.headings_deg:
                 qs, lines = plan_hole(int(hi), dyaw)
                 if qs is not None:
                     break
+                bad = [ln.split(":")[0].strip() + ": " + ln.split("<-- TOO LOW")[1].strip() for ln in lines if "TOO LOW" in ln]
+                why.append(f"heading {dyaw:+.0f}: " + (bad[0] if bad else lines[-1].split(": ", 1)[-1]))
             if qs is not None:
                 break
-            print(lines[-1] if len(lines) == 1 else f"H{hi + 1}: unsafe path from every heading, next hole")
+            print(f"H{hi + 1}: no safe path from any heading, next hole")
+            for w in why:
+                print("    " + w)
         for ln in lines:
             print(ln)
         if qs is None:
@@ -262,7 +296,7 @@ def main() -> int:
     if args.phase == "carry":
         if not at("start"):
             return 1
-        for name in [k for k in ("up", "across", "above") if k in q]:
+        for name in [k for k in ("up", "via", "across", "above") if k in q]:
             if not move(q[name], args.dynamics, name):
                 return 1
         return 0

@@ -75,6 +75,8 @@ def main() -> int:
     ap.add_argument("--wrist-clearance-mm", type=float, default=None, help="wrist joints / flange centres above what lies under them "
                     "(default grasp.side_wrist_clearance_mm: 70 for the pitched grasp until 2026-11-02; a flat hand has its flange at "
                     "the stem's height, the user judged the arm clear of the tray then)")
+    ap.add_argument("--wrist-clearance-off-tray-mm", type=float, default=None,
+                    help="the same away from the tray (over the disc and the table): default grasp.side_wrist_clearance_off_tray_mm")
     ap.add_argument("--wrist-reach-mm", type=float, default=80.0, help="the wrist housings reach this far sideways (see 71)")
     ap.add_argument("--camera-clearance-mm", type=float, default=20.0, help="camera housing above what lies under it")
     ap.add_argument("--dynamics", type=float, default=None, help="one factor for all moves (default: robot.dynamics / fine_dynamics in the config)")
@@ -83,6 +85,11 @@ def main() -> int:
     fine = "fine" if args.dynamics is None else min(args.dynamics, 0.03)
     if args.wrist_clearance_mm is None:
         args.wrist_clearance_mm = float(cfg["grasp"].get("side_wrist_clearance_mm", 70.0))
+    if args.wrist_clearance_off_tray_mm is None:
+        args.wrist_clearance_off_tray_mm = float(cfg["grasp"].get("side_wrist_clearance_off_tray_mm", 70.0))
+    # the wrist housings are ~6 cm in radius around the checked joint centres: over the tray the user's own setting
+    # (tested by hand), over the disc and the table the full clearance
+    extra_off = max(0.0, args.wrist_clearance_off_tray_mm - args.wrist_clearance_mm) / 1000
 
     from seedling import kinematics
     from seedling.calibration import load_T_FC
@@ -123,7 +130,7 @@ def main() -> int:
             q = qa + s * (qb - qa)
             pts = body_points_B(q, T_FC, cfg)
             wr = np.vstack([pts["wrist joints"], pts["flange"]])
-            lows["wrist"] = min(lows["wrist"], float((wr[:, 2] - surf.under(wr, args.wrist_reach_mm / 1000)).min()))
+            lows["wrist"] = min(lows["wrist"], float((wr[:, 2] - surf.under(wr, args.wrist_reach_mm / 1000, extra_off)).min()))
             cm = pts["camera housing"]
             lows["camera"] = min(lows["camera"], float((cm[:, 2] - surf.under(cm)).min()))
             g = G_of(q)[:3, 3]
@@ -421,7 +428,7 @@ def main() -> int:
                         pts = body_points_B(q_g, T_FC, cfg)
                         wr = np.vstack([pts["wrist joints"], pts["flange"]])
                         clear = (self_clearance(q_g, T_FC, cfg) >= args.self_clearance_mm / 1000
-                                 and float((wr[:, 2] - surf.under(wr, args.wrist_reach_mm / 1000)).min()) >= args.wrist_clearance_mm / 1000)
+                                 and float((wr[:, 2] - surf.under(wr, args.wrist_reach_mm / 1000, extra_off)).min()) >= args.wrist_clearance_mm / 1000)
                         cands.append((not clear, k != 0, -self_clearance(q_g, T_FC, cfg), q_g))
                 cands.sort(key=lambda c_: c_[:3])
                 branches, found = [], False

@@ -82,13 +82,14 @@ class Surfaces:
         self.disc_c = np.array(disc["centre"][:2]) if ok else None
         self.disc_r = 0.085 + 0.01
 
-    def under(self, P: np.ndarray, reach: float = 0.0) -> np.ndarray:
-        """the highest surface within `reach` (horizontally) of each point"""
+    def under(self, P: np.ndarray, reach: float = 0.0, extra_off_tray: float = 0.0) -> np.ndarray:
+        """the highest surface within `reach` (horizontally) of each point; `extra_off_tray` is added to the disc and
+        table tops (a larger clearance there than over the tray, see grasp.side_wrist_clearance_off_tray_mm)"""
         P = np.atleast_2d(P)[:, :2]
         uv = (P - self.c) @ self.R  # tray axes
-        f = np.where((np.abs(uv) <= self.half + reach).all(axis=1), self.tray_top, self.table_z)
+        f = np.where((np.abs(uv) <= self.half + reach).all(axis=1), self.tray_top, self.table_z + extra_off_tray)
         if self.disc_c is not None:
-            f = np.where(np.hypot(*(P - self.disc_c).T) < self.disc_r + reach, np.maximum(f, self.disc_top), f)
+            f = np.where(np.hypot(*(P - self.disc_c).T) < self.disc_r + reach, np.maximum(f, self.disc_top + extra_off_tray), f)
         return f
 
 
