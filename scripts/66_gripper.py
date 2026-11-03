@@ -44,8 +44,15 @@ def main() -> int:
         r = g.grasp(0.003)
         print(f"closed: {r.reason}")
         time.sleep(1.0)
-        print(f"brake pressure {g.pressure_kpa() or 0:.1f} kPa (the firmware holds it until 'open')")
+        p = g.pressure_kpa() or 0.0
+        print(f"brake pressure {p:.1f} kPa (the firmware holds it until 'open')")
         detach(g)
+        # a working brake holds ~80-86 kPa; 2026-11-02 the gripper was not switched on: 3.9 kPa, yet "pressure reached"
+        p_min = float(cfg["gripper"].get("pin_brake", {}).get("min_brake_kpa", 40.0))
+        if p < p_min:
+            print(f"FAILED: brake pressure {p:.1f} kPa, a working brake holds ~80 kPa (at least {p_min:.0f}): "
+                  "is the gripper switched on? (夹爪没有启动？)")
+            return 1
     elif args.command == "open":
         g.open()
         time.sleep(0.3)

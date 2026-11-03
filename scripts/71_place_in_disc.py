@@ -49,8 +49,12 @@ def main() -> int:
                     help="the same away from the tray (over the disc and the table): default grasp.side_wrist_clearance_off_tray_mm")
     ap.add_argument("--wrist-reach-mm", type=float, default=80.0, help="the wrist housings reach this far sideways: the surface "
                     "within it counts as under them (the joint 5/6 housing hit the tray's edge from 80 mm beside it)")
-    ap.add_argument("--ik-tries", type=int, default=40, help="IK solutions of the across pose collected (random starts)")
-    ap.add_argument("--max-branches", type=int, default=8, help="of those, how many are tried (clear of the arm first)")
+    ap.add_argument("--ik-tries", type=int, default=12, help="more IK solutions of the across pose (random starts) when the one near the lift pose fails")
+    ap.add_argument("--max-branches", type=int, default=4, help="of those (same family), how many are tried, least joint change first")
+    ap.add_argument("--max-raise-mm", type=float, default=30.0, help="let go up to this much higher when the wrist would come too close to the disc")
+    ap.add_argument("--tray-plants-mm", type=float, default=50.0, help="while carrying, the plug bottom this far above the tray top where over the tray")
+    ap.add_argument("--placed-plant-mm", type=float, default=150.0, help="plants already in the disc: this tall above the disc top")
+    ap.add_argument("--placed-plant-radius-mm", type=float, default=40.0, help="... and the hand keeps this far from their stems")
     ap.add_argument("--camera-clearance-mm", type=float, default=20.0)
     ap.add_argument("--self-clearance-mm", type=float, default=90.0, help="hand from the arm's own upper arm and forearm (see 65)")
     ap.add_argument("--dynamics", type=float, default=None, help="one factor for all moves (default: robot.dynamics / fine_dynamics in the config)")
@@ -139,46 +143,133 @@ def main() -> int:
             Rr, a = attitude(xy, dyaw)
             return make_T(Rr, np.array([xy[0], xy[1], z_close]) - a * fwd)  # G = open gap centre; the closed fingers hold the stem fwd ahead
 
-        def plan_hole(hi, dyaw):
+        free = [int(h) for h in args.free.split(",")] if args.free else disc.get("free_holes", list(range(1, len(holes) + 1)))
+        if args.hole and args.hole not in free:
+            print(f"refused: H{args.hole} is taken (a plug in it on the last overview); free: {free}")
+            return 1
+        taken = np.array([holes[i] for i in range(len(holes)) if i + 1 not in free]).reshape(-1, 2)
+        plant_top = disc_top + args.placed_plant_mm / 1000
+        # above the disc the plug only has to clear the disc and the plants already in it (lower than over the tray:
+        # a flat hand high above a hole close to the robot folds onto the forearm)
+        z_t_disc = disc_top + max(args.transit_mm, args.placed_plant_mm) / 1000 + below
+        sc_min = args.self_clearance_mm / 1000
+        z_up = max(z_t, lift_stem[2])
+        T_up = make_T(R0, np.array([lift_stem[0], lift_stem[1], z_up]) - R0[:, 2] * fwd)
+        q_up = ik(T_up, q_lift)
+
+        def natural(q, xy):
+            """the arm's own family of joint solutions for a flat hand: base turned towards the target (within 100 deg)
+            and the shoulder leaning forward. The mirrored family (base turned away, shoulder leaning back, joint 3
+            mirrored) reaches the same poses, but switching between the two turned joint 2 by 157 deg in one move
+            (2026-11-02, C8: Franka stopped it with a velocity discontinuity)"""
+            d = (q[0] - np.arctan2(xy[1], xy[0]) + np.pi) % (2 * np.pi) - np.pi
+            return abs(d) < np.radians(100) and q[1] > -0.3
+
+        def wrist_low(q, extra=True):
+            pts = body_points_B(q, T_FC, cfg)
+            wr = np.vstack([pts["wrist joints"], pts["flange"]])
+            return float((wr[:, 2] - floor_at(wr, args.wrist_reach_mm / 1000, extra_off)).min())
+
+        def move_check(name, qa, qb):
+            # along the straight joint path: wrist/flange and camera clear of what lies under them (the tray top over the
+            # tray, the disc top over the disc, else the table); the held plug's bottom above the tops while carrying; the
+            # hand clear of the arm itself; near the disc, the hand (gripper body, flange, wrist, camera) clear of the
+            # plants already in other holes. Few samples for the short moves (planning time)
+            long_ = name in ("up", "via", "across")
+            n = 25 if long_ else 7
+            cw = cc = lg = pm = np.inf
+            hit = None
+            for t in np.linspace(0, 1, n):
+                qq = qa + t * (qb - qa)
+                pts = body_points_B(qq, T_FC, cfg)
+                wr = np.vstack([pts["wrist joints"], pts["flange"]])
+                cw = min(cw, float((wr[:, 2] - floor_at(wr, args.wrist_reach_mm / 1000, extra_off)).min()))
+                cm = pts["camera housing"]
+                cc = min(cc, float((cm[:, 2] - floor_at(cm)).min()))
+                Gq = G_of(qq)[:3, 3]
+                lg = min(lg, float(Gq[2]))
+                # the plug bottom: over the tray (+3 cm) at least --tray-plants-mm above its top (leaves of the plants
+                # still in it), elsewhere 20 mm above what lies under it
+                fz = float(surf.under(Gq, 0.03)[0])
+                need = fz + (args.tray_plants_mm / 1000 if fz >= tray_top - 1e-6 else 0.02)
+                pm = min(pm, float(Gq[2]) - below - need) if (name != "up" or t == 1.0) else pm
+                if len(taken) and hit is None and name != "up":
+                    fl = pts["flange"][0]
+                    hand = np.vstack([wr, cm, [fl + s * (Gq - fl) for s in (0.0, 0.33, 0.67, 1.0)]])
+                    low = hand[hand[:, 2] < plant_top]
+                    if len(low):
+                        dd = np.hypot(low[:, None, 0] - taken[None, :, 0], low[:, None, 1] - taken[None, :, 1])
+                        if (dd < args.placed_plant_radius_mm / 1000).any():
+                            hit = "a plant already in the disc"
+            bad = []
+            if cw < args.wrist_clearance_mm / 1000:
+                bad.append("wrist/flange")
+            if cc < args.camera_clearance_mm / 1000:
+                bad.append("camera")
+            if long_ and pm < 0:  # the plug starts low at the lift pose: on the way up only where it ends counts
+                bad.append("plug bottom")
+            if hit:
+                bad.append(hit)
+            sc = path_self_clearance(qa, qb, T_FC, cfg, n=21 if long_ else 7)
+            if sc < sc_min:
+                bad.append(f"hand {sc * 1000:.0f} mm from the arm itself")
+            line = (f"  {name:9s}: max joint change {np.degrees(np.abs(qb - qa)).max():5.1f} deg; clearance wrist/flange {cw * 1000:.0f} mm, "
+                    f"camera {cc * 1000:.0f} mm over what lies below; grasp centre down to {lg:.3f}" + (f"  <-- TOO LOW {bad}" if bad else ""))
+            return not bad, line
+
+        def plan_hole(hi, dyaw, raise_m=0.0):
+            """joints for up, across, [above], insert, back, up after (+ via); or None and why. The plant is let go
+            raise_m higher than --insert-mm when the wrist would otherwise come too close to the disc. Carried across
+            at the lift height first (level over the tray), else lower: only clear of the disc and its plants (a flat
+            hand high above a hole close to the robot can fold onto the forearm)"""
+            res = (None, None)
+            for zc in sorted({round(max(z_up, z_above + raise_m), 4), round(max(z_t_disc, z_above + raise_m), 4)}, reverse=True):
+                r = plan_hole_at(hi, dyaw, raise_m, zc)
+                if r[0] is not None:
+                    return r
+                res = r if res[1] is None else res
+            return res
+
+        def plan_hole_at(hi, dyaw, raise_m, z_carry):
             hxy = holes[hi]
-            steps = [("up", make_T(R0, np.array([lift_stem[0], lift_stem[1], max(z_t, lift_stem[2])]) - R0[:, 2] * fwd)),
-                     ("across", pose(hxy, max(z_t, z_above), dyaw))]
-            if z_t > z_above + 1e-3:
-                steps.append(("above", pose(hxy, z_above, dyaw)))
-            steps.append(("insert", pose(hxy, z_ins, dyaw)))
             Rh, ah = attitude(hxy, dyaw)
             ah_h = np.array([ah[0], ah[1], 0.0]) / np.linalg.norm(ah[:2])
-            T_back = make_T(Rh, steps[-1][1][:3, 3] - ah_h * args.back_mm / 1000)
-            steps += [("back", T_back), ("up after", make_T(Rh, T_back[:3, 3] + [0, 0, args.up_mm / 1000]))]
-            # "across" is a long move from the grasp heading to the hole's. A flat hand high above a disc close to the
-            # robot folds the wrist back towards the forearm in most joint solutions (7 joints: many solutions per
-            # pose), as for the grasp (65): --ik-tries solutions of the across pose are collected, those with the hand
-            # clear of the arm first (the one near the lift pose first among them, then the least joint change: a big
-            # wrist roll strains the camera cable);
-            # the short moves after it are solved near it. When only the across move itself fails (its straight joint
-            # path sweeps the camera past the forearm or dips the plug), it goes through a via pose: the wrist joints
-            # 5-7 turned first, or last
-            q_up = ik(steps[0][1], q_lift)
-            if q_up is None:
-                return None, [f"H{hi + 1}: not reachable (up)"]
-            T_ac = steps[1][1]
-            sc_min = args.self_clearance_mm / 1000
-            cands = []
-            for k in range(args.ik_tries + 2):
-                if k == 0:
-                    q = ik(T_ac, q_up)
-                else:
+            z_i, z_a = z_ins + raise_m, z_above + raise_m
+            T_ins = pose(hxy, z_i, dyaw)
+            T_back = make_T(Rh, T_ins[:3, 3] - ah_h * args.back_mm / 1000)
+            hole_side = ([("above", pose(hxy, z_a, dyaw))] if z_carry > z_a + 1e-3 else []) + \
+                [("insert", T_ins), ("back", T_back), ("up after", make_T(Rh, T_back[:3, 3] + [0, 0, args.up_mm / 1000]))]
+            T_ac = pose(hxy, z_carry, dyaw)
+            # "across" is the long move from the grasp heading to the hole's. A flat hand high above a disc close to the
+            # robot folds the wrist back towards the forearm in most joint solutions (7 joints: many per pose): the one
+            # near the lift pose first, then other solutions of the same family (least joint change first); the moves
+            # at the hole are solved near it. Cheap checks first: the end poses, then the short moves, the long one last;
+            # when only the across move fails, it goes through a via pose (the wrist joints 5-7 turned first, or last)
+            fail, seen = None, []
+
+            def candidates():
+                q0 = ik(T_ac, q_up)
+                if q0 is not None:
+                    yield q0
+                more = []
+                for k in range(1, args.ik_tries + 1):
                     start = q_up if k == 1 else np.random.default_rng(k).uniform(kinematics.Q_MIN, kinematics.Q_MAX)
                     q = kinematics.solve_ik(T_ac @ inv_T(G), start, F, margin, n_random_seeds=0 if k > 1 else 4, rng_seed=k)
-                    if q is not None and np.linalg.norm(G_of(q)[:3, 3] - T_ac[:3, 3]) > 0.0015:
-                        q = None
-                if q is not None and not any(np.abs(q - c_[3]).max() < 0.05 for c_ in cands):
-                    cands.append((self_clearance(q, T_FC, cfg) < sc_min, k != 0, float(np.abs(q - q_up).max()), q))
-            cands.sort(key=lambda c_: c_[:3])
-            fail = None if cands else [f"H{hi + 1}: not reachable (across)"]
-            for *_, q_ac in cands[:args.max_branches]:
+                    if q is not None and np.linalg.norm(G_of(q)[:3, 3] - T_ac[:3, 3]) <= 0.0015:
+                        more.append(q)
+                yield from sorted(more, key=lambda q_: float(np.abs(q_ - q_up).max()))
+
+            for q_ac in candidates():
+                if len(seen) >= args.max_branches:
+                    break
+                if any(np.abs(q_ac - s_).max() < 0.05 for s_ in seen) or not natural(q_ac, hxy):
+                    continue
+                seen.append(q_ac)
+                if self_clearance(q_ac, T_FC, cfg) < sc_min:
+                    fail = fail or [f"H{hi + 1}: across: hand too close to the arm itself"]
+                    continue
                 qs, seed, q = {"up": q_up, "across": q_ac}, q_ac, q_ac
-                for name, T in steps[2:]:
+                for name, T in hole_side:
                     q = ik(T, seed)
                     if q is None:
                         break
@@ -186,75 +277,69 @@ def main() -> int:
                 if q is None:
                     fail = fail or [f"H{hi + 1}: not reachable ({name})"]
                     continue
-                ok, lines = check(qs, steps)
+                # the wrist over the disc when letting go: raise the release (at most --max-raise-mm) rather than give up
+                short = args.wrist_clearance_mm / 1000 - wrist_low(qs["insert"])
+                if short > 0:
+                    if raise_m + short + 0.003 <= args.max_raise_mm / 1000 + 1e-9:
+                        return "raise", raise_m + short + 0.003
+                    fail = [f"H{hi + 1}: insert: wrist/flange {short * 1000:.0f} mm too low even with the release raised"]
+                    continue
+                names = [n_ for n_, _ in hole_side]
+                lines, ok = {}, True
+                for a_, b_ in zip(["across"] + names, names):  # the short moves at the hole first
+                    ok, lines[b_] = move_check(b_, qs[a_], qs[b_])
+                    if not ok:
+                        break
+                if not ok:
+                    fail = [lines[k_] for k_ in lines]
+                    continue
+                ok_up, l_up = move_check("up", q_lift, q_up)
+                if not ok_up:
+                    return None, [l_up]  # the same for every hole and heading
+                ok, l_ac = move_check("across", q_up, q_ac)
                 if ok:
-                    return qs, lines
-                fail = lines
-                if any("TOO LOW" in ln for ln in lines if not ln.lstrip().startswith("across")):
-                    continue  # a via pose only changes the across move
+                    return qs, [l_up, l_ac] + [lines[n_] for n_ in names]
+                fail = [l_up, l_ac]
                 for qv in (np.r_[q_up[:4], q_ac[4:]], np.r_[q_ac[:4], q_up[4:]]):
-                    steps_v = steps[:1] + [("via", None)] + steps[1:]
-                    ok, lines_v = check({**qs, "via": qv}, steps_v)
-                    if ok:
-                        return {**qs, "via": qv}, lines_v
-            return None, fail
+                    ok1, l1 = move_check("via", q_up, qv)
+                    ok2, l2 = move_check("across", qv, q_ac) if ok1 else (False, "")
+                    if ok1 and ok2:
+                        return {**qs, "via": qv}, [l_up, l1, l2] + [lines[n_] for n_ in names]
+            return None, fail or [f"H{hi + 1}: not reachable (across)"]
 
-        def check(qs, steps):
-            # along every joint path: wrist/flange and camera clear of what lies under them (the tray top over the
-            # tray, the disc top over the disc, else the table); the held plug's bottom above the tops while carrying
-            ok, prev, lines = True, q_lift, []
-            for name, _ in steps:
-                q = qs[name]
-                cw = cc = lg = np.inf
-                for t in np.linspace(0, 1, 61):
-                    qq = prev + t * (q - prev)
-                    pts = body_points_B(qq, T_FC, cfg)
-                    wr = np.vstack([pts["wrist joints"], pts["flange"]])
-                    cw = min(cw, float((wr[:, 2] - floor_at(wr, args.wrist_reach_mm / 1000, extra_off)).min()))
-                    cm = pts["camera housing"]
-                    cc = min(cc, float((cm[:, 2] - floor_at(cm)).min()))
-                    lg = min(lg, float(G_of(qq)[2, 3]))
-                bad = []
-                if cw < args.wrist_clearance_mm / 1000:
-                    bad.append("wrist/flange")
-                if cc < args.camera_clearance_mm / 1000:
-                    bad.append("camera")
-                # the plug starts low at the lift pose: on the way up only where it ends counts
-                lg_check = float(G_of(q)[2, 3]) if name == "up" else lg
-                if name in ("up", "via", "across") and lg_check - below < top + 0.02:
-                    bad.append("plug bottom")
-                sc = path_self_clearance(prev, q, T_FC, cfg)
-                if sc < args.self_clearance_mm / 1000:
-                    bad.append(f"hand {sc * 1000:.0f} mm from the arm itself")
-                ok &= not bad
-                lines.append(f"  {name:9s}: max joint change {np.degrees(np.abs(q - prev)).max():5.1f} deg; clearance wrist/flange {cw * 1000:.0f} mm, "
-                             f"camera {cc * 1000:.0f} mm over what lies below; grasp centre down to {lg:.3f}" + (f"  <-- TOO LOW {bad}" if bad else ""))
-                prev = q
-            return ok, lines
-
-        free = [int(h) for h in args.free.split(",")] if args.free else disc.get("free_holes", list(range(1, len(holes) + 1)))
-        if args.hole and args.hole not in free:
-            print(f"refused: H{args.hole} is taken (a plug in it on the last overview); free: {free}")
+        if q_up is None:
+            print("not reachable: straight up from the lift pose")
+            place_file.write_text(json.dumps({"cell": args.cell, "safe": False}))
             return 1
-        # nearest the robot first; --hole is tried first, and when it cannot be reached now (the grasp measured after the
-        # first plan can change the carry pose by a few mm, enough at a joint limit) the other free holes follow
-        order = [i for i in np.argsort(np.hypot(holes[:, 0], holes[:, 1])) if i + 1 in free]
+        # farthest from the robot first: the flat hand trails back towards the robot over the holes nearer to it, so
+        # these are filled last (their plants would be in the way of the hand). --hole is tried first, and when it
+        # cannot be reached now (the grasp measured after the first plan changes the carry pose by a few mm) the other
+        # free holes follow
+        order = [i for i in np.argsort(-np.hypot(holes[:, 0], holes[:, 1])) if i + 1 in free]
         if args.hole:
             order = [args.hole - 1] + [i for i in order if i != args.hole - 1]
         if not order:
             print("no free hole left in the disc")
             return 1
         # the hand's heading over the hole: straight out from the robot first, then turned (the plant turns about its
-        # own stem, it stays upright). A flat hand straight out is at joint 6's limit, as when grasping
-        qs = None
+        # own stem, it stays upright)
+        qs, raised = None, 0.0
         for hi in order:
             why = []  # per heading: the first move that failed and the check (or where the IK ran out)
             for dyaw in args.headings_deg:
+                raised = 0.0
                 qs, lines = plan_hole(int(hi), dyaw)
+                if isinstance(qs, str):
+                    raised = lines
+                    qs, lines = plan_hole(int(hi), dyaw, raised)
+                    if isinstance(qs, str):
+                        qs, lines = None, [f"H{hi + 1}: insert: wrist/flange too low even with the release raised"]
                 if qs is not None:
                     break
                 bad = [ln.split(":")[0].strip() + ": " + ln.split("<-- TOO LOW")[1].strip() for ln in lines if "TOO LOW" in ln]
                 why.append(f"heading {dyaw:+.0f}: " + (bad[0] if bad else lines[-1].split(": ", 1)[-1]))
+                if lines and lines[0].lstrip().startswith("up ") and "TOO LOW" in lines[0]:
+                    break
             if qs is not None:
                 break
             print(f"H{hi + 1}: no safe path from any heading, next hole")
@@ -270,10 +355,11 @@ def main() -> int:
         if args.hole and hi + 1 != args.hole:
             print(f"H{args.hole} cannot be reached now: H{hi + 1} instead")
         print(f"hole H{hi + 1} at {np.round(holes[hi], 4).tolist()}, hand heading {dyaw:+.0f} deg from straight out, disc top {disc_top:.3f}; plug bottom {below * 1000:.0f} mm below the held stem; "
-              f"carried at plug bottom {(z_t - below - top) * 1000:.0f} mm above the tops, let go with it {args.insert_mm:.0f} mm in the hole, "
-              f"finger bottom {(fingers - disc_top) * 1000:.0f} mm above the disc")
+              f"lifted to plug bottom {(z_up - below - tray_top) * 1000:.0f} mm above the tray top, over the disc {(G_of(qs["across"])[2, 3] - below - disc_top) * 1000:.0f} mm above its top, " + (f"let go with the plug bottom {raised * 1000:.0f} mm above the hole (raised: the wrist over the disc), " if raised > 0 else
+                    f"let go with it {args.insert_mm:.0f} mm in the hole, ") +
+              f"finger bottom {(fingers + raised - disc_top) * 1000:.0f} mm above the disc")
         place_file.write_text(json.dumps({"cell": args.cell, "hole": hi + 1, "hole_xy": holes[hi].tolist(), "q": {k: v.tolist() for k, v in qs.items()},
-                                          "start": q_lift.tolist(), "safe": True}, indent=1))
+                                          "start": q_lift.tolist(), "release_raised_mm": round(raised * 1000, 1), "safe": True}, indent=1))
         print("place plan saved")
         return 0
 

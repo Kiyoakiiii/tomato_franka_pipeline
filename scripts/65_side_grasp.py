@@ -67,7 +67,7 @@ def main() -> int:
     ap.add_argument("--self-clearance-mm", type=float, default=90.0, help="hand (flange, camera, gripper) from the arm's own upper arm and "
                     "forearm axes on every move: Franka's self-collision reflex stopped moves at 69 mm (2026-11-02)")
     ap.add_argument("--ik-tries", type=int, default=40, help="joint solutions of the grasp pose collected per heading (random starts)")
-    ap.add_argument("--max-branches", type=int, default=8, help="of these, at most this many tried (the camera farthest from the forearm first)")
+    ap.add_argument("--max-branches", type=int, default=8, help="of these (the arm's own family only), at most this many tried (least joint change first)")
     ap.add_argument("--lift-mm", type=float, default=20.0)
     ap.add_argument("--dx-mm", type=float, default=0.0, help="nudge: horizontal, along the approach")
     ap.add_argument("--dy-mm", type=float, default=0.0, help="nudge: along the closing axis")
@@ -413,8 +413,8 @@ def main() -> int:
                 # the elbow and wrist go. A flat hand (pitch 0) far out folds the wrist back so that the camera comes
                 # close to the forearm (Franka's self-collision reflex: 69 mm, 2026-11-02) or drops the wrist below the
                 # hand in most of them, but not in all: --ik-tries solutions of the grasp pose are collected, those clear
-                # there first (the one reached straight from the current joints first among them, then the camera
-                # farthest from the forearm); pre-grasp and stage are then solved near it, the lift near the grasp
+                # there first (the one reached straight from the current joints first among them, then the least joint
+                # change); pre-grasp and stage are then solved near it, the lift near the grasp
                 T_gr, cands = make_T(R, grasp) @ inv_T(G), []
                 for k in range(args.ik_tries + 2):
                     if k == 0:
@@ -424,12 +424,18 @@ def main() -> int:
                         q_g = kinematics.solve_ik(T_gr, start, F, margin, n_random_seeds=0 if k > 1 else 4, rng_seed=k)
                         if q_g is not None and np.linalg.norm(G_of(q_g)[:3, 3] - grasp) > 0.0015:
                             q_g = None
-                    if q_g is not None and not any(np.abs(q_g - c_[1]).max() < 0.05 for c_ in cands):
+                    # only the arm's own family (base turned towards the plant, shoulder leaning forward): the mirrored
+                    # family (base turned away, shoulder back) reaches the same pose, but the placement then switched
+                    # families and turned joint 2 by 157 deg in one move (2026-11-02, C8: Franka stopped it)
+                    d1 = (q_g[0] - np.arctan2(c[1], c[0]) + np.pi) % (2 * np.pi) - np.pi if q_g is not None else 0.0
+                    if q_g is not None and (abs(d1) >= np.radians(100) or q_g[1] <= -0.3):
+                        q_g = None
+                    if q_g is not None and not any(np.abs(q_g - c_[3]).max() < 0.05 for c_ in cands):
                         pts = body_points_B(q_g, T_FC, cfg)
                         wr = np.vstack([pts["wrist joints"], pts["flange"]])
                         clear = (self_clearance(q_g, T_FC, cfg) >= args.self_clearance_mm / 1000
                                  and float((wr[:, 2] - surf.under(wr, args.wrist_reach_mm / 1000, extra_off)).min()) >= args.wrist_clearance_mm / 1000)
-                        cands.append((not clear, k != 0, -self_clearance(q_g, T_FC, cfg), q_g))
+                        cands.append((not clear, k != 0, float(np.abs(q_g - q_now).max()), q_g))  # least joint change: the smallest swing
                 cands.sort(key=lambda c_: c_[:3])
                 branches, found = [], False
                 for *_, q_gr in cands[:args.max_branches]:
