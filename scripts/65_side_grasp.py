@@ -516,10 +516,12 @@ def main() -> int:
                             else:
                                 over_limit[0] = min(over_limit[0], pc_g)
                     low_ = bool(why_g) and why_g[0][1].endswith(("- tray", "- table")) and not cands
-                    if not low_ or z_c - why_g[0][0] + 0.001 > z_cap + 1e-6:
+                    # 3 mm more than missing at the grasp: the approach line (the hand 13+ mm further back) and the IK of its
+                    # waypoints come out a little lower (C8 2026-11-05: +1 mm at the grasp, -0 mm on the approach)
+                    if not low_ or z_c - why_g[0][0] + 0.003 > z_cap + 1e-6:
                         break
-                    print(f"  {tag}: closing point raised {(-why_g[0][0] + 0.001) * 1000:.0f} mm ({why_g[0][1]} {why_g[0][0] * 1000:+.0f} mm at the grasp)")
-                    z_c -= why_g[0][0] - 0.001
+                    print(f"  {tag}: closing point raised {(-why_g[0][0] + 0.003) * 1000:.0f} mm ({why_g[0][1]} {why_g[0][0] * 1000:+.0f} mm at the grasp)")
+                    z_c -= why_g[0][0] - 0.003
                 cands.sort(key=lambda c_: c_[0])
                 if not cands:
                     print(f"  {tag}: no joint solution clear at the grasp itself" + (f" ({why_g[0][1]}: {why_g[0][0] * 1000:+.0f} mm)" if why_g else ""))

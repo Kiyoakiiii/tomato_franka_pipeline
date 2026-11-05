@@ -134,8 +134,18 @@ def locate_disc(frame: Frame, T_BC: np.ndarray, area=(0.30, 0.95, -0.50, 0.50), 
     blobs = []
     for k in range(1, n):
         w, hgt, a = st[k, 2], st[k, 3], st[k, 4]
-        if a < 300 or max(w, hgt) > 2.5 * min(w, hgt) or a < 0.5 * w * hgt:  # round, filled blobs only
+        if a < 300 or max(w, hgt) > 2.5 * min(w, hgt):
             continue
+        if a < 0.5 * w * hgt:
+            # filled enough? the eroded blob of a free hole whose bottom is darker fills less of its box (2026-11-05: 0.48-0.50,
+            # two free holes missed); then the red share inside its convex hull decides: free holes 0.74-0.99, a hole
+            # with a plug in it (red ring around the soil) 0.41-0.42
+            grown = cv2.dilate((lab == k).astype(np.uint8), np.ones((5, 5), np.uint8)) & m0
+            cnts, _ = cv2.findContours(grown, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            hm = np.zeros_like(m0)
+            cv2.fillConvexPoly(hm, cv2.convexHull(max(cnts, key=cv2.contourArea)), 1)
+            if (m0 & hm).sum() < 0.65 * max(int(hm.sum()), 1):
+                continue
         sel = (lab == k) & inarea
         if sel.sum() >= 0.2 * a or ((lab == k) & ok).sum() < 0.05 * a:
             # in the area, or no depth at all to tell (checked below by the fit)
