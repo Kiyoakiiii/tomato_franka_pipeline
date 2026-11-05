@@ -114,41 +114,32 @@ def main() -> int:
             out.append((row_dist[k[0]], float(cells[k][1]), k))
         return [k for *_, k in sorted(out)]
 
-    # the camera and the gripper's serial port kept open for the whole run (scripts/63_camera_server.py,
-    # 64_gripper_server.py): each script asks them instead of opening the device itself (each camera open + close
-    # took 3-20 s; each gripper connect waited 3 s for a banner and then opened the gripper once more, ~20 s per plant)
-    servers = []
+    # the camera kept open for the whole run (scripts/63_camera_server.py): each script asks it for a picture instead
+    # of opening the ZED itself (each open + close took 3-20 s)
+    cam_srv = None
     if not args.dry_run:
         import os
 
-        for script, sock_name, env_name in (("scripts/63_camera_server.py", "camera.sock", "SEEDLING_CAMERA_SOCK"),
-                                            ("scripts/64_gripper_server.py", "gripper.sock", "SEEDLING_GRIPPER_SOCK")):
-            sock = PROJECT_DIR / ".tmp" / sock_name
-            logf = PROJECT_DIR / ".tmp" / sock_name.replace(".sock", "_server.log")
-            logf.parent.mkdir(exist_ok=True)
-            p_ = subprocess.Popen([py, "-u", script, "--sock", str(sock)], cwd=PROJECT_DIR,
-                                  stdout=open(logf, "w"), stderr=subprocess.STDOUT)
-            servers.append(p_)
-            t_end = time.time() + 30
-            ready = False
-            while time.time() < t_end and p_.poll() is None:
-                if "server ready" in logf.read_text(errors="replace"):
-                    os.environ[env_name] = str(sock)
-                    ready = True
-                    break
-                time.sleep(0.1)
-            if not ready:
-                print(f"{script} did not start: the scripts open the device themselves")
+        sock = PROJECT_DIR / ".tmp" / "camera.sock"
+        cam_srv = subprocess.Popen([py, "-u", "scripts/63_camera_server.py", "--sock", str(sock)], cwd=PROJECT_DIR,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        t_end = time.time() + 30
+        while time.time() < t_end and cam_srv.poll() is None:
+            ln = cam_srv.stdout.readline()
+            if "camera server ready" in ln:
+                os.environ["SEEDLING_CAMERA_SOCK"] = str(sock)
+                break
+        else:
+            print("camera server did not start: the scripts open the camera themselves")
     try:
         return _run(args, cfg, py, grasp_dir, stop, log_file, log, run, go_on, load, plants)
     finally:
-        for p_ in servers:
-            if p_.poll() is None:
-                p_.terminate()
-                try:
-                    p_.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    p_.kill()
+        if cam_srv is not None and cam_srv.poll() is None:
+            cam_srv.terminate()
+            try:
+                cam_srv.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                cam_srv.kill()
 
 
 def _run(args, cfg, py, grasp_dir, stop, log_file, log, run, go_on, load, plants) -> int:

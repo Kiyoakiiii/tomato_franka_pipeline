@@ -14,9 +14,21 @@ from __future__ import annotations
 
 import _common  # noqa: F401  (first: caps math threads, sets project paths)
 
+import termios
 import time
 
 from _common import base_parser, config_from_args
+
+
+def detach(g) -> None:
+    """Stop reading and close the port, keeping DTR as it is (no Arduino reset): the gripper stays as it is."""
+    ser = g.dev.ser
+    g.dev.running = False
+    time.sleep(0.2)
+    attrs = termios.tcgetattr(ser.fd)
+    attrs[2] &= ~termios.HUPCL
+    termios.tcsetattr(ser.fd, termios.TCSANOW, attrs)
+    ser.close()
 
 
 def main() -> int:
@@ -31,10 +43,10 @@ def main() -> int:
     if args.command == "close":
         r = g.grasp(0.003)
         print(f"closed: {r.reason}")
-        time.sleep(0.3)  # the brake pressure is up within this (1 s until 2026-11-04)
+        time.sleep(1.0)
         p = g.pressure_kpa() or 0.0
         print(f"brake pressure {p:.1f} kPa (the firmware holds it until 'open')")
-        g.release_port()
+        detach(g)
         # a working brake holds ~80-86 kPa; 2026-11-02 the gripper was not switched on: 3.9 kPa, yet "pressure reached"
         p_min = float(cfg["gripper"].get("pin_brake", {}).get("min_brake_kpa", 40.0))
         if p < p_min:
@@ -43,18 +55,17 @@ def main() -> int:
             return 1
     elif args.command == "open":
         g.open()
+        time.sleep(0.3)
         print(f"open, pressure {g.pressure_kpa() or 0:.1f} kPa, pump off")
-        g.release_port()
+        detach(g)
     else:
-        if hasattr(g, "dev"):
-            g.dev._start_stream()
+        g.dev._start_stream()
         t_end = time.time() + 2.0
         while time.time() < t_end:
             time.sleep(0.5)
             print(f"pressure {g.pressure_kpa() or 0:.1f} kPa")
-        if hasattr(g, "dev"):
-            g.dev._stop_stream()
-        g.release_port()
+        g.dev._stop_stream()
+        detach(g)
     return 0
 
 
