@@ -203,7 +203,7 @@ def solve_ik_near(
     q_start: np.ndarray,
     F_T_EE: np.ndarray = DEFAULT_F_T_EE,
     limit_margin_rad: float = 0.05,
-    steps: int = 10,
+    steps: int | None = None,
     pull: float = 0.03,
     pos_tol_m: float = 1e-3,
     rot_tol_deg: float = 0.5,
@@ -218,6 +218,9 @@ def solve_ik_near(
     T0 = fk(q, F_T_EE)
     dR = Rotation.from_matrix(target_T_BE[:3, :3] @ T0[:3, :3].T).as_rotvec()
     rot_weight = 0.2
+    if steps is None:  # a step per 3 cm or 6 deg (10 steps for every move until 2026-11-04, most of the planning time)
+        steps = int(np.clip(np.ceil(max(np.linalg.norm(target_T_BE[:3, 3] - T0[:3, 3]) / 0.03,
+                                        np.linalg.norm(dR) / np.radians(6.0))), 1, 10))
     for k in range(1, steps + 1):
         Tk = T0.copy()
         Tk[:3, :3] = Rotation.from_rotvec(dR * k / steps).as_matrix() @ T0[:3, :3]

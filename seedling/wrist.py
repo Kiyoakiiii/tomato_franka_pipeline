@@ -160,7 +160,19 @@ class ObservationPlan:
 JOINT_WEIGHTS = np.array([1.0, 1.0, 1.0, 1.0, 0.7, 0.7, 1.0])  # big joints sweep the whole arm; joint 7 counts fully (big wrist rolls strain the camera cable)
 
 
-def plan_observation(target_B: np.ndarray, q_now: np.ndarray, T_FC: np.ndarray, floor_z: float, cfg: dict) -> ObservationPlan:
+def plan_observation(target_B: np.ndarray, q_now: np.ndarray, T_FC: np.ndarray, floor_z: float, cfg: dict,
+                     _global_ik: bool | None = None) -> ObservationPlan:
+    """(see below) First only the IK solutions reached from the current joints; the global IK (random starts) for the
+    views that have none only when that finds no pose at all (2026-11-04: 1.7 s instead of 6.5 s per cell; the far
+    cells still need the global one)"""
+    if _global_ik is None:
+        pl = plan_observation(target_B, q_now, T_FC, floor_z, cfg, _global_ik=False)
+        return pl if pl.ok else plan_observation(target_B, q_now, T_FC, floor_z, cfg, _global_ik=True)
+    return _plan_observation(target_B, q_now, T_FC, floor_z, cfg, _global_ik)
+
+
+def _plan_observation(target_B: np.ndarray, q_now: np.ndarray, T_FC: np.ndarray, floor_z: float, cfg: dict,
+                      global_ik: bool) -> ObservationPlan:
     """For the first elevation (config order) that has any valid candidate: the azimuth/roll candidate with the
     least weighted joint change that is reachable and keeps the arm body above ``floor_z`` (or, if it starts
     below, never lower than it starts) along the whole joint path. With observe.all_elevations, every elevation
@@ -183,7 +195,7 @@ def plan_observation(target_B: np.ndarray, q_now: np.ndarray, T_FC: np.ndarray, 
                 T_BC = look_from(target_B, radial + np.radians(az), float(elev), float(o["distance_m"]), float(roll))
                 T_BE = T_BC @ inv_T(T_FC) @ F_T_EE
                 q = kinematics.solve_ik_near(T_BE, q_now, F_T_EE, margin)
-                if q is None:
+                if q is None and global_ik:
                     q = kinematics.solve_ik(T_BE, q_now, F_T_EE, margin)
                 if q is None:
                     tried.append((desc, "no IK"))

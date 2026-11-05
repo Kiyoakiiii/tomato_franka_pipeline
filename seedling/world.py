@@ -15,7 +15,6 @@ the arm with fixed clearances; the forearm then touched a disc it was modelled 1
 from __future__ import annotations
 
 from functools import lru_cache
-from pathlib import Path
 
 import numpy as np
 
@@ -36,17 +35,37 @@ DEFAULTS = {
 
 @lru_cache(maxsize=1)
 def _robot():
+    """(pinocchio model, [(parent joint, placement 4x4)] per collision mesh, convex hulls, coal, pinocchio, radii).
+    Cached in .tmp/ (keyed by the URDF's modification time): reading the URDF and its meshes took ~0.5 s in every
+    planning process (2026-11-04)"""
+    import pickle
+
     import coal
     import pinocchio as pin
 
     if not URDF.exists():
-        raise FileNotFoundError(f"{URDF}: generate it (see README, 'collision model')")
+        raise FileNotFoundError(f"{URDF}: generate it (tools/build_fr3_urdf.sh)")
+    cache = PROJECT_DIR / ".tmp" / "fr3_world_cache.pkl"
+    key = (str(URDF), URDF.stat().st_mtime_ns)
+    try:
+        d = pickle.loads(cache.read_bytes())
+        if d["key"] == key:
+            return d["model"], d["geoms"], d["hulls"], coal, pin, d["radii"]
+    except Exception:  # noqa: BLE001  (no cache yet, or an old one)
+        pass
     model, cmodel, _ = pin.buildModelsFromUrdf(str(URDF), package_dirs=[str(URDF.parent.parent)])
-    hulls = []
+    hulls, radii, geoms = [], [], []
     for g in cmodel.geometryObjects:
         g.geometry.buildConvexHull(True, "Qt")
         hulls.append(g.geometry.convex)
-    return model, cmodel, hulls, coal, pin
+        radii.append(float(np.linalg.norm(np.asarray(g.geometry.vertices()), axis=1).max()))
+        geoms.append((int(g.parentJoint), np.array(g.placement.homogeneous)))
+    try:
+        cache.parent.mkdir(exist_ok=True)
+        cache.write_bytes(pickle.dumps({"key": key, "model": model, "geoms": geoms, "hulls": hulls, "radii": radii}))
+    except Exception:  # noqa: BLE001  (no cache: still works)
+        pass
+    return model, geoms, hulls, coal, pin, radii
 
 
 def _box(lo_hi):
@@ -57,9 +76,9 @@ def _box(lo_hi):
 class World:
     def __init__(self, cfg: dict, T_FC: np.ndarray, grid: dict | None = None, disc: dict | None = None, *,
                  tray_plants=None, taken_holes=None, held_below_m: float | None = None, hold_forward_m: float = 0.0):
-        model, cmodel, hulls, coal, pin = _robot()
-        self.model, self.data, self.cmodel, self.hulls, self.coal, self.pin = model, model.createData(), cmodel, hulls, coal, pin
-        self.gdata = pin.GeometryData(cmodel)
+        model, geoms, hulls, coal, pin, radii = _robot()
+        self.link_r = radii
+        self.model, self.data, self.geoms, self.hulls, self.coal, self.pin = model, model.createData(), geoms, hulls, coal, pin
         p = dict(DEFAULTS)
         p.update(cfg.get("world") or {})
         self.p = {k: float(v) for k, v in p.items()}
@@ -118,20 +137,19 @@ class World:
         pin = self.pin
         qq = np.asarray(q, float) + kinematics.JOINT_OFFSETS
         pin.forwardKinematics(self.model, self.data, qq)
-        pin.updateGeometryPlacements(self.model, self.data, self.cmodel, self.gdata)
-        shapes = []  # (name, shape, R, t)
-        for i, g in enumerate(self.cmodel.geometryObjects):
-            M = self.gdata.oMg[i]
-            shapes.append((f"link{i}", self.hulls[i], M.rotation, M.translation))
+        shapes = []  # (name, shape, R, t, bounding radius)
+        for i, (j, P) in enumerate(self.geoms):
+            M = self.data.oMi[j].homogeneous @ P
+            shapes.append((f"link{i}", self.hulls[i], M[:3, :3], M[:3, 3], self.link_r[i]))
         T_BF = kinematics.fk_flange(q)
         for name, shp, T in self.attached:
             Tw = T_BF @ T
             if isinstance(shp, tuple):  # the held plug: a cylinder from the stem down
                 depth = shp[1]
                 c = Tw[:3, 3] - np.array([0, 0, depth / 2])
-                shapes.append((name, self.coal.Cylinder(0.016, depth), np.eye(3), c))
+                shapes.append((name, self.coal.Cylinder(0.016, depth), np.eye(3), c, depth / 2 + 0.016))
             else:
-                shapes.append((name, shp, Tw[:3, :3], Tw[:3, 3]))
+                shapes.append((name, shp, Tw[:3, :3], Tw[:3, 3], _radius(shp)))
         return shapes
 
     def _dist(self, a, b):
@@ -147,18 +165,18 @@ class World:
         S = self._place(q)
         out = {"env": (np.inf, ""), "plants": (np.inf, ""), "self": (np.inf, "")}
         movers = [s for s in S if s[0] not in ("link0", "link1") and (fingers or s[0] != "fingers") and (plug or s[0] != "held plug")]
-        C = self.coal
         for name, kind, shp, T in self.obstacles:
             if name in ignore or (kind == "soft" and not plants):
                 continue
             need = (p["env_clearance_mm"] if kind == "rigid" else p["plant_clearance_mm"]) / 1000
             key = "env" if kind == "rigid" else "plants"
             ob = (shp, T[:3, :3], T[:3, 3])
+            r_ob = _radius(shp)
             for s in movers:
                 if name == "table" and s[0] in ("link2",):
                     continue
-                # cheap reject: far apart (bounding spheres)
-                if np.linalg.norm(s[3] - T[:3, 3]) > 0.9:
+                # cheap reject: bounding spheres more than 10 cm apart beyond what is needed (not the closest pair)
+                if np.linalg.norm(s[3] - T[:3, 3]) - s[4] - r_ob > need + 0.10:
                     continue
                 d = self._dist(s, ob) - need
                 if d < out[key][0]:
@@ -202,6 +220,17 @@ class World:
                 if v < best[0]:
                     best = (v, f"{k}: {w}")
         return best
+
+
+def _radius(shp) -> float:
+    """bounding-sphere radius of a coal primitive about its own origin"""
+    import coal
+
+    if isinstance(shp, coal.Box):
+        return float(np.linalg.norm(np.asarray(shp.halfSide)))
+    if isinstance(shp, coal.Cylinder):
+        return float(np.hypot(shp.radius, shp.halfLength))
+    return 1.0
 
 
 def _T(R, t):

@@ -196,7 +196,23 @@ def main() -> int:
         from seedling.plugsense import measure_plug
 
         c = np.array(grid["cells"][args.cell], float)
-        pl = observe_pose(q_now)
+        pl = None
+        # the observation pose worked out when this plant was chosen (72: 65 plan --from-observe), from this same pose
+        if plan_file.exists():
+            try:
+                old_ = json.loads(plan_file.read_text())
+                if ("observe_q" in old_ and float(np.degrees(np.abs(np.array(old_["observe_from"]) - q_now)).max()) < 0.5
+                        and np.linalg.norm(np.array(old_["observe_cell_xyz"]) - np.array(grid["cells"][args.cell], float)) < 0.003):
+                    from seedling.wrist import ObservationPlan, path_clearance
+
+                    q_o = np.array(old_["observe_q"])
+                    z_, part_ = path_clearance(q_now, q_o, T_FC, cfg)
+                    pl = ObservationPlan(True, q_o, None, old_["observe_desc"] + " (worked out when the plant was chosen)",
+                                         float(np.degrees(np.abs(q_o - q_now)).max()), z_, part_)
+            except Exception:  # noqa: BLE001
+                pl = None
+        if pl is None:
+            pl = observe_pose(q_now)
         if not pl.ok:
             print("no safe observation pose:", pl.tried[-3:])
             return None
@@ -282,12 +298,15 @@ def main() -> int:
         return 0
 
     if args.phase == "plan":
+        obs_from = None
         if args.from_observe:
             pl = observe_pose(q_now)
             if not pl.ok:
                 print("no safe observation pose:", pl.tried[-3:])
                 return 1
             print(f"planned from the observation pose ({pl.desc}, max joint change {pl.max_joint_step_deg:.0f} deg)")
+            obs_from = {"observe_from": q_now.tolist(), "observe_q": pl.q.tolist(), "observe_desc": pl.desc,
+                        "observe_cell_xyz": [float(v) for v in grid["cells"][args.cell]]}
             q_now = pl.q
         off = args.offset_mm if args.offset_mm is not None else cfg["grasp"].get("side_offset_mm", [0.0, 0.0])
         c = np.array(grid["cells"][args.cell], float)
@@ -626,7 +645,7 @@ def main() -> int:
                                          "vias": [v.tolist() for v in q_via],
                                          **{f"{k_}_vias": [v.tolist() for v in q_down[k_]] for k_ in ("down", "approach", "lift")},
                                          "z_close": round(float(z_close), 4), "tray_top": round(tray_top, 4),
-                                         "yaw": float(radial + np.radians(dyaw)),
+                                         "yaw": float(radial + np.radians(dyaw)), **(obs_from or {}),
                                          "safe": bool(ok)}, indent=1))
         print("plan saved" if ok else "plan saved but NOT SAFE: the motion phases will refuse it", plan_file.relative_to(PROJECT_DIR))
         return 0 if ok else 1
