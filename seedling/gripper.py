@@ -130,17 +130,34 @@ class PinBrakeGripper(GripperBase):
                 raise RuntimeError("pin-brake gripper not found (USB cable / power / permission on /dev/ttyUSB*)")
         self.dev = _pin_brake_device_class()(ser, is_open=banner)
         self.dev.set_pressure(float(self.s["pressure_kpa"]))
+        # the pressure sensor reads 4-6 kPa at rest: "deflated" below 2 kPa was never reached, every open waited the
+        # full 3 s (2026-11-04)
+        pb.DEFLATE_DONE_KPA = float(self.s.get("deflate_done_kpa", 6.5))
         self.last = {}
+
+    def release_port(self) -> None:
+        """Stop reading and close the port keeping DTR (no Arduino reset): the gripper stays as it is."""
+        import termios
+
+        ser = self.dev.ser
+        self.dev.running = False
+        time.sleep(0.2)
+        attrs = termios.tcgetattr(ser.fd)
+        attrs[2] &= ~termios.HUPCL
+        termios.tcsetattr(ser.fd, termios.TCSANOW, attrs)
+        ser.close()
 
     def pressure_kpa(self) -> float | None:
         """Latest pad pressure (streamed while closed), None if no sample yet."""
         t, kpa = self.dev.latest_pressure
         return kpa if t > 0 else None
 
-    def open(self, width_m=None):
+    def open(self, width_m=None, wait: bool = True):
+        """wait False: return once the servo is told to open (the next close waits until it is open)"""
         self._confirm("pin-brake gripper open (deflate, pneumatics off, servo to 0)")
         self.dev.open()
-        self.pb.sleep_until(self.dev.open_done_time)  # G0 returns at once; wait until the pins are clear
+        if wait:
+            self.pb.sleep_until(self.dev.open_done_time)  # G0 returns at once; wait until the pins are clear
         return True
 
     def grasp(self, width_m, force_n=None):
@@ -236,7 +253,54 @@ class SimGripper(GripperBase):
         return GraspResult(True, self._w, self.holding_from_width(self._w))
 
 
+class RemoteGripper(GripperBase):
+    """The pin-brake gripper through scripts/64_gripper_server.py (its port kept open for a whole run)."""
+
+    def __init__(self, cfg, sock: str):
+        super().__init__(cfg)
+        self.sock = sock
+
+    def _ask(self, req: dict, timeout_s: float = 30.0) -> dict:
+        import json
+        import socket
+
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout_s)
+        s.connect(self.sock)
+        try:
+            f = s.makefile("rw")
+            f.write(json.dumps(req) + "\n")
+            f.flush()
+            return json.loads(f.readline() or "{}")
+        finally:
+            s.close()
+
+    def open(self, width_m=None, wait: bool = True):
+        r = self._ask({"cmd": "open", "wait": wait})
+        self._p = r.get("pressure_kpa")
+        return bool(r.get("ok"))
+
+    def grasp(self, width_m, force_n=None):
+        r = self._ask({"cmd": "close"})
+        self._p = r.get("pressure_kpa")
+        return GraspResult(bool(r.get("ok")), None, None, r.get("reason", ""))
+
+    def pressure_kpa(self):
+        return self._ask({"cmd": "pressure"}).get("pressure_kpa")
+
+    def release_port(self) -> None:
+        pass
+
+    def close(self):
+        pass
+
+
 def make_gripper(cfg: dict, sim: bool, step_mode: bool, confirm_fn=None, world=None) -> GripperBase:
+    import os
+
+    sock = os.environ.get("SEEDLING_GRIPPER_SOCK")
+    if not sim and sock and os.path.exists(sock) and cfg["gripper"]["type"] == "pin_brake":
+        return RemoteGripper(cfg, sock)
     if sim:
         return SimGripper(cfg, world=world)
     t = cfg["gripper"]["type"]

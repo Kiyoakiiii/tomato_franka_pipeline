@@ -650,16 +650,11 @@ def main() -> int:
         if not at("start", 2.0):
             return 1
         from seedling.gripper import make_gripper
-        import termios
 
+        # opened while the arm turns (the close waits until it is open): not waited for here
         g = make_gripper(cfg, sim=False, step_mode=False)
-        g.open()
-        ser = g.dev.ser
-        g.dev.running = False
-        attrs = termios.tcgetattr(ser.fd)
-        attrs[2] &= ~termios.HUPCL
-        termios.tcsetattr(ser.fd, termios.TCSANOW, attrs)
-        ser.close()
+        g.open(wait=False)
+        g.release_port()
         for i_, qv in enumerate(plan.get("vias", [])):  # the turn, through the via poses of the path search
             if not move(np.array(qv), args.dynamics, f"turn (via pose {i_ + 1}/{len(plan['vias'])})"):
                 return 1
