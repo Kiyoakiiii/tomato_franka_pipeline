@@ -149,6 +149,29 @@ def main() -> int:
                 print(f"CHECK FAILED for {cell}: cell empty {ok_cell}, one more hole taken {ok_hole}: stopped "
                       "(the plant may have slipped; please look)")
                 break
+        # what a flat hand in a natural posture can reach at all (seedling.feasibility: a few IK solutions, seconds):
+        # told before anything moves, with what to change; those plants / holes are not planned
+        from seedling.feasibility import check_layout
+
+        feas = check_layout(grid, disc, todo, free, cfg)
+        bad_p = {k: v for k, v in feas["plants"].items() if v}
+        bad_h = {h: v for h, v in feas["holes"].items() if v}
+        if bad_p or bad_h:
+            print(f"FEASIBILITY: {len(todo) - len(bad_p)}/{len(todo)} plants and {len(free) - len(bad_h)}/{len(free)} free holes "
+                  "can be reached with a flat hand in a natural posture")
+            if bad_p:
+                print(f"  plants not reachable flat: {sorted(bad_p)}; to change: {feas.get('tray_change', '?')}")
+            if bad_h:
+                print(f"  holes not reachable flat: {sorted(bad_h)}; to change: {feas.get('disc_change', '?')}")
+        if float(cfg["grasp"].get("max_posture_deg", 60.0)) <= 60.0:
+            # twisted postures not allowed: those plants / holes are not planned at all
+            todo = [k for k in todo if k not in bad_p]
+            free = [h for h in free if h not in bad_h]
+            if not todo or not free:
+                print("nothing can be done in this layout: change it as suggested above")
+                break
+        elif bad_p or bad_h:
+            print("  (these need a twisted posture: planned with the least twisted safe one)")
         print(f"free holes {free}; plants left (nearest first) {todo}")
         if not free and args.dry_run and todo and discs_left[0] > 1:
             discs_left[0] -= 1

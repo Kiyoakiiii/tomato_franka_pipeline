@@ -32,7 +32,7 @@ DEFAULTS = {
     "placed_plant_radius_mm": 40.0,
     "clearance_mm": 20.0,
     "camera_clearance_mm": 20.0,
-    "wrist_reach_mm": 80.0,
+    "wrist_reach_mm": 0.0,
     "self_clearance_mm": 90.0,
 }
 
@@ -47,7 +47,7 @@ class Scene:
         p.update(cfg.get("scene") or {})
         g = cfg.get("grasp", {})
         p.setdefault("wrist_clearance_mm", float(g.get("side_wrist_clearance_mm", 20.0)))
-        p.setdefault("wrist_clearance_off_tray_mm", float(g.get("side_wrist_clearance_off_tray_mm", 70.0)))
+        p.setdefault("wrist_clearance_off_tray_mm", float(g.get("side_wrist_clearance_off_tray_mm", 20.0)))
         self.p = {k: float(v) for k, v in p.items()}
         self.cfg, self.T_FC = cfg, T_FC
         self.F, self.G = flange_to_ee(cfg), ee_to_contact(cfg)
@@ -80,7 +80,7 @@ class Scene:
         minus its minimum"""
         p = self.p
         pts = body_points_B(q, self.T_FC, self.cfg)
-        wr = np.vstack([pts["wrist joints"], pts["flange"]])
+        wr = np.vstack([pts["arm"], pts["flange"]])
         reach = p["wrist_reach_mm"] / 1000
         over_tray = self.surf.under(wr, reach) >= self.surf.tray_top - 1e-6
         need_w = np.where(over_tray, p["wrist_clearance_mm"], p["wrist_clearance_off_tray_mm"]) / 1000

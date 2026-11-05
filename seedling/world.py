@@ -1,0 +1,210 @@
+"""One collision model of the arm and what is around it, for every check of every motion.
+
+- The arm: Franka's own FR3 description (data/third_party/fr3_build/fr3.urdf, from franka_description), the
+  collision mesh of each link as its convex hull (coal), placed by pinocchio (the same kinematics as
+  seedling.kinematics, joint offsets included: checked to 1e-15).
+- Attached to the flange: the camera housing (camera.housing_box_m in the camera frame, T_FC), the gripper body and
+  fingers (gripper.body_box_m / finger_box_m in the EE frame), a held plug (a cylinder under the held stem).
+- Rigid obstacles: the table; the tray as a solid block from the table up to its top (a stand under it included);
+  the disc as a solid cylinder from the table up to its top.
+- Soft obstacles: the plants in the tray (upright cylinders on their cells) and in the disc (on their holes).
+
+Clearances are true distances between these shapes (coal GJK). Until 2026-11-04 the checks used a few points of
+the arm with fixed clearances; the forearm then touched a disc it was modelled 10 cm above.
+"""
+from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
+
+import numpy as np
+
+from . import kinematics
+from .config import PROJECT_DIR, ee_to_contact, flange_to_ee
+
+URDF = PROJECT_DIR / "data" / "third_party" / "fr3_build" / "fr3.urdf"
+
+DEFAULTS = {
+    "tray_plant_height_mm": 120.0, "tray_plant_radius_mm": 35.0,
+    "placed_plant_height_mm": 150.0, "placed_plant_radius_mm": 20.0,  # stem and plug (holes are 57.5 mm apart; leaves are soft)
+    "disc_radius_mm": 90.0,
+    "env_clearance_mm": 15.0,     # arm / camera / gripper body to table, tray, disc
+    "plant_clearance_mm": 10.0,   # to the plant cylinders (leaves are soft)
+    "self_clearance_mm": 25.0,    # between the hand (gripper, camera, links 6-7) and links 0-4, link 5 and links 0-2
+}
+
+
+@lru_cache(maxsize=1)
+def _robot():
+    import coal
+    import pinocchio as pin
+
+    if not URDF.exists():
+        raise FileNotFoundError(f"{URDF}: generate it (see README, 'collision model')")
+    model, cmodel, _ = pin.buildModelsFromUrdf(str(URDF), package_dirs=[str(URDF.parent.parent)])
+    hulls = []
+    for g in cmodel.geometryObjects:
+        g.geometry.buildConvexHull(True, "Qt")
+        hulls.append(g.geometry.convex)
+    return model, cmodel, hulls, coal, pin
+
+
+def _box(lo_hi):
+    (x0, x1), (y0, y1), (z0, z1) = lo_hi
+    return np.array([x1 - x0, y1 - y0, z1 - z0]), np.array([(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2])
+
+
+class World:
+    def __init__(self, cfg: dict, T_FC: np.ndarray, grid: dict | None = None, disc: dict | None = None, *,
+                 tray_plants=None, taken_holes=None, held_below_m: float | None = None, hold_forward_m: float = 0.0):
+        model, cmodel, hulls, coal, pin = _robot()
+        self.model, self.data, self.cmodel, self.hulls, self.coal, self.pin = model, model.createData(), cmodel, hulls, coal, pin
+        self.gdata = pin.GeometryData(cmodel)
+        p = dict(DEFAULTS)
+        p.update(cfg.get("world") or {})
+        self.p = {k: float(v) for k, v in p.items()}
+        self.cfg, self.T_FC = cfg, T_FC
+        self.F, self.G = flange_to_ee(cfg), ee_to_contact(cfg)
+        C = coal
+        # attached shapes: (name, shape, T_flange_shape)
+        att = []
+        size, ctr = _box(cfg["camera"]["housing_box_m"])
+        att.append(("camera", C.Box(*size), T_FC @ _T(np.eye(3), ctr)))
+        gcfg = cfg["gripper"]
+        size, ctr = _box(gcfg.get("body_box_m", [[-0.02, 0.02], [-0.045, 0.045], [-0.1034, 0.0]]))
+        att.append(("gripper", C.Box(*size), self.F @ _T(np.eye(3), ctr)))
+        size, ctr = _box(gcfg.get("finger_box_m", [[-0.009, 0.009], [-0.032, 0.032], [0.0, 0.0626]]))
+        att.append(("fingers", C.Box(*size), self.F @ _T(np.eye(3), ctr)))
+        if held_below_m is not None:
+            # the plug hangs under the held stem (fwd ahead of the contact point), ~30 mm wide, held_below_m deep
+            T_stem = self.F @ self.G @ _T(np.eye(3), [0, 0, hold_forward_m])
+            att.append(("held plug", ("plug", held_below_m), T_stem))
+        self.attached = att
+        # obstacles: (name, kind rigid/soft, shape, T_world)
+        obs = []
+        tz = float((grid or {}).get("table_z", 0.0))
+        obs.append(("table", "rigid", C.Box(3.0, 3.0, 0.02), _T(np.eye(3), [0.5, 0, tz - 0.01])))
+        if grid is not None:
+            import cv2
+
+            cells = np.array([v[:2] for v in grid["cells"].values()], np.float32)
+            (cx, cy), (w, h), ang = cv2.minAreaRect(cells)
+            pitch = float(cfg["tray"]["model"]["pitch_m"])
+            top = float(grid["z_top"])
+            Rz = _Rz(np.radians(ang))
+            obs.append(("tray", "rigid", C.Box(w + pitch + 0.03, h + pitch + 0.03, top - tz), _T(Rz, [cx, cy, (top + tz) / 2])))
+            names = (grid.get("planted") or grid.get("occupied", [])) if tray_plants is None else tray_plants
+            hgt, r = self.p["tray_plant_height_mm"] / 1000, self.p["tray_plant_radius_mm"] / 1000
+            for k in names:
+                x, y = grid["cells"][k][:2]
+                obs.append((f"plant {k}", "soft", C.Cylinder(r, hgt), _T(np.eye(3), [x, y, top + hgt / 2])))
+        if disc is not None and disc.get("ok", True) and "centre" in disc:
+            dt = float(disc["z_top"])
+            c = disc["centre"]
+            obs.append(("disc", "rigid", C.Cylinder(self.p["disc_radius_mm"] / 1000, dt - tz), _T(np.eye(3), [c[0], c[1], (dt + tz) / 2])))
+            holes = disc.get("holes", [])
+            if taken_holes is None:
+                free = set(disc.get("free_holes", range(1, len(holes) + 1)))
+                taken_holes = [i for i in range(1, len(holes) + 1) if i not in free]
+            hgt, r = self.p["placed_plant_height_mm"] / 1000, self.p["placed_plant_radius_mm"] / 1000
+            for hno in taken_holes:
+                x, y = holes[hno - 1][:2]
+                obs.append((f"plant in H{hno}", "soft", C.Cylinder(r, hgt), _T(np.eye(3), [x, y, dt + hgt / 2])))
+        self.obstacles = obs
+        self._req = C.DistanceRequest()
+
+    # ---- placement of the arm's shapes -------------------------------------------------------------------------
+    def _place(self, q):
+        pin = self.pin
+        qq = np.asarray(q, float) + kinematics.JOINT_OFFSETS
+        pin.forwardKinematics(self.model, self.data, qq)
+        pin.updateGeometryPlacements(self.model, self.data, self.cmodel, self.gdata)
+        shapes = []  # (name, shape, R, t)
+        for i, g in enumerate(self.cmodel.geometryObjects):
+            M = self.gdata.oMg[i]
+            shapes.append((f"link{i}", self.hulls[i], M.rotation, M.translation))
+        T_BF = kinematics.fk_flange(q)
+        for name, shp, T in self.attached:
+            Tw = T_BF @ T
+            if isinstance(shp, tuple):  # the held plug: a cylinder from the stem down
+                depth = shp[1]
+                c = Tw[:3, 3] - np.array([0, 0, depth / 2])
+                shapes.append((name, self.coal.Cylinder(0.016, depth), np.eye(3), c))
+            else:
+                shapes.append((name, shp, Tw[:3, :3], Tw[:3, 3]))
+        return shapes
+
+    def _dist(self, a, b):
+        C = self.coal
+        res = C.DistanceResult()
+        return C.distance(a[1], C.Transform3s(a[2], a[3]), b[0], C.Transform3s(b[1], b[2]), self._req, res)
+
+    def clearances(self, q, *, fingers: bool = True, plug: bool = True, plants: bool = True, ignore=()) -> dict:
+        """smallest distance minus what it needs, per kind: 'env' (rigid obstacles), 'plants', 'self' (m; >= 0 fine),
+        with the closest pair. fingers/plug False: the fingers / held plug are not checked against the obstacles
+        (when they are meant to be at the plant or in the hole); ignore: obstacle names left out (the plant grasped)"""
+        p = self.p
+        S = self._place(q)
+        out = {"env": (np.inf, ""), "plants": (np.inf, ""), "self": (np.inf, "")}
+        movers = [s for s in S if s[0] not in ("link0", "link1") and (fingers or s[0] != "fingers") and (plug or s[0] != "held plug")]
+        C = self.coal
+        for name, kind, shp, T in self.obstacles:
+            if name in ignore or (kind == "soft" and not plants):
+                continue
+            need = (p["env_clearance_mm"] if kind == "rigid" else p["plant_clearance_mm"]) / 1000
+            key = "env" if kind == "rigid" else "plants"
+            ob = (shp, T[:3, :3], T[:3, 3])
+            for s in movers:
+                if name == "table" and s[0] in ("link2",):
+                    continue
+                # cheap reject: far apart (bounding spheres)
+                if np.linalg.norm(s[3] - T[:3, 3]) > 0.9:
+                    continue
+                d = self._dist(s, ob) - need
+                if d < out[key][0]:
+                    out[key] = (d, f"{s[0]} - {name}")
+        # self: the link pairs Franka's own description does not exclude (franka_arm.srdf: adjacent or 'Never' pairs are
+        # left out), and the attached camera / gripper / plug against links 0-5 (the camera came within 69 mm of the
+        # forearm's axis and Franka's reflex stopped the arm, 2026-11-02)
+        by = {s_[0]: s_ for s_ in S}
+        pairs = [(f"link{i}", f"link{j}") for i, j in ((0, 5), (0, 6), (0, 7), (1, 5), (1, 6), (1, 7), (2, 5), (2, 7))]
+        pairs += [(a_, f"link{j}") for a_ in ("camera", "gripper", "fingers", "held plug") if a_ in by for j in range(6)]
+        need = p["self_clearance_mm"] / 1000
+        for a_, b_ in pairs:
+            A, B = by[a_], by[b_]
+            d = self._dist(A, (B[1], B[2], B[3])) - need
+            if d < out["self"][0]:
+                out["self"] = (d, f"{a_} - {b_}")
+        return out
+
+    def margins(self, q, **kw) -> dict:
+        return {k: v[0] for k, v in self.clearances(q, **kw).items()}
+
+    def free_ok(self, q) -> bool:
+        return self.ok(q)
+
+    def ok(self, q, **kw) -> bool:
+        return min(v[0] for v in self.clearances(q, **kw).values()) >= 0.0
+
+    def worst(self, qa, qb, step_deg: float = 2.0, **kw):
+        """the smallest clearance (minus need) along the straight joint path, and where"""
+        n = max(1, int(np.ceil(np.degrees(np.abs(np.asarray(qb) - np.asarray(qa)).max()) / step_deg)))
+        best = (np.inf, "")
+        for t in np.linspace(0.0, 1.0, n + 1):
+            c = self.clearances(np.asarray(qa) + t * (np.asarray(qb) - np.asarray(qa)), **kw)
+            for k, (v, w) in c.items():
+                if v < best[0]:
+                    best = (v, f"{k}: {w}")
+        return best
+
+
+def _T(R, t):
+    T = np.eye(4)
+    T[:3, :3] = R
+    T[:3, 3] = t
+    return T
+
+
+def _Rz(a):
+    c, s = np.cos(a), np.sin(a)
+    return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1.0]])

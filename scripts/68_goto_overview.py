@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-"""Go to the overview pose (tray.overview_q): first straight up where the arm is (until its lowest part is at
---up-to), then to the overview along a path found by seedling.motion (straight, one via pose, or a random-tree
-search), every pose of it clear of what is around (seedling.scene: table, tray and disc tops, the plants in the tray
-and in the disc, the arm itself).
+"""Go to the overview pose (tray.overview_q): first straight up where the arm is (only if needed, and
+as little as needed), then to the overview along a path (seedling.planner: straight, else OMPL), every pose of it
+clear of what is around (seedling.world: Franka's own link meshes, the camera, the gripper; the table, the tray and
+the disc as solid blocks, the plants in the tray and in the disc, the arm itself).
 
     .venvs/pipeline/bin/python scripts/68_goto_overview.py --dry-run
     .venvs/pipeline/bin/python scripts/68_goto_overview.py
@@ -23,7 +23,6 @@ from seedling.config import PROJECT_DIR
 
 def main() -> int:
     ap = base_parser(__doc__)
-    ap.add_argument("--up-to", type=float, default=0.32, help="lift until the lowest part of the hand is this high (if it can go straight up)")
     ap.add_argument("--dynamics", type=float, default=None, help="one factor for all moves (default: robot.dynamics in the config)")
     ap.add_argument("--path-time-s", type=float, default=10.0, help="random-tree path search time when no straight or one-via path is safe")
     ap.add_argument("--after-place", default=None, metavar="CELL", help="the plant of this cell was just put into the disc "
@@ -36,9 +35,9 @@ def main() -> int:
     cfg = config_from_args(args)
 
     from seedling.calibration import load_T_FC
-    from seedling.motion import lift_then_path
+    from seedling.planner import lift_then_plan
     from seedling.robot import FrankyRobot
-    from seedling.scene import Scene
+    from seedling.world import World
 
     T_FC, _ = load_T_FC(cfg)
     q_ov = np.array(cfg["tray"]["overview_q"], float)
@@ -62,16 +61,16 @@ def main() -> int:
                 free.remove(json.loads(pf.read_text())["hole"])
             plants = [k for k in plants if k != args.after_place]
         taken = [h for h in range(1, len(disc["holes"]) + 1) if h not in free]
-    scene = Scene(grid, disc, cfg, T_FC, tray_plants=plants, taken_holes=taken)
+    world = World(cfg, T_FC, grid, disc, tray_plants=plants, taken_holes=taken)
 
-    steps, msg = lift_then_path(q0, q_ov, scene, cfg, T_FC, up_to=args.up_to, time_s=args.path_time_s)
+    steps, msg = lift_then_plan(q0, q_ov, world, cfg, time_s=args.path_time_s)
     if steps is None:
         print(f"to the overview: NOT SAFE: no safe way found ({msg})")
         return 1
     print(msg)
     steps = [(n.replace("the goal", "the overview"), qa, qb) for n, qa, qb in steps]
     for name, qa, qb in steps:
-        m, part = scene.worst(qa, qb)
+        m, part = world.worst(qa, qb)
         print(f"{name}: max joint change {np.degrees(np.abs(qb - qa)).max():.0f} deg, smallest margin {m * 1000:+.0f} mm ({part})")
     if args.dry_run:
         return 0

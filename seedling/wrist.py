@@ -27,12 +27,29 @@ def housing_corners_C(cfg: dict) -> np.ndarray:
     return np.array([[x, y, z] for x in (x0, x1) for y in (y0, y1) for z in (z0, z1)], dtype=float)
 
 
+_LINK_POINTS = None
+
+
+def link_surface_points(frames) -> np.ndarray:
+    """Surface points of links 3-7 (Franka's own FR3 collision meshes, franka_description meshes/robots/fr3/collision,
+    thinned to ~1 cm) in the base frame. Until 2026-11-04 only the wrist joint centres were checked (+ a fixed
+    clearance): the forearm/wrist housing (link 5) then touched a disc it was modelled 10 cm above."""
+    global _LINK_POINTS
+    if _LINK_POINTS is None:
+        from pathlib import Path
+
+        d = np.load(Path(__file__).with_name("fr3_collision_points.npz"))
+        _LINK_POINTS = [np.asarray(d[f"link{i}"], float) for i in range(1, 8)]
+    return np.vstack([(frames[i - 1][:3, :3] @ _LINK_POINTS[i - 1].T).T + frames[i - 1][:3, 3] for i in range(3, 8)])
+
+
 def body_points_B(q: np.ndarray, T_FC: np.ndarray, cfg: dict) -> dict[str, np.ndarray]:
-    """Points of the arm end that must stay clear of the table, in the base frame."""
+    """Points of the arm that must stay clear of what is around, in the base frame: the surface of links 3-7 ("arm",
+    the official collision meshes), the flange, the gripper contact point, the camera housing."""
     F_T_EE = flange_to_ee(cfg)
     frames, T_BE = kinematics._frames(np.asarray(q, float), F_T_EE)
     T_BF = T_BE @ inv_T(F_T_EE)
-    pts = {"wrist joints": np.array([f[:3, 3] for f in frames[4:]]), "flange": T_BF[:3, 3][None]}
+    pts = {"arm": link_surface_points(frames), "flange": T_BF[:3, 3][None]}
     if cfg["gripper"].get("type", "none") != "none":
         pts["gripper contact point"] = (T_BE @ ee_to_contact(cfg))[:3, 3][None]
     if T_FC is not None:
@@ -67,7 +84,10 @@ class Surfaces:
     rim, square corners), the disc top within the disc (+1 cm), else the table. From the located tray grid and disc
     (calibration/*.json)."""
 
-    def __init__(self, grid: dict, disc: dict | None, cfg: dict):
+    def __init__(self, grid: dict, disc: dict | None, cfg: dict, disc_keepout_m: float = 0.0):
+        """disc_keepout_m: over the disc (and within reach of it) nothing may come lower than this above its top
+        (the grasp: the hand has no business there; 2026-11-04 the flat hand reaching over a disc in front of the
+        tray touched it, the wrist centres 10 cm above its top)"""
         import cv2
 
         self.tray_top = float(grid["z_top"])
@@ -78,7 +98,7 @@ class Surfaces:
         edge = float(cfg["tray"]["model"]["pitch_m"]) / 2 + 0.015
         self.half = np.array([w / 2 + edge, h / 2 + edge])
         ok = disc is not None and disc.get("ok", True) and "centre" in disc
-        self.disc_top = float(disc["z_top"]) if ok else None
+        self.disc_top = float(disc["z_top"]) + disc_keepout_m if ok else None
         self.disc_c = np.array(disc["centre"][:2]) if ok else None
         self.disc_r = 0.085 + 0.01
 
