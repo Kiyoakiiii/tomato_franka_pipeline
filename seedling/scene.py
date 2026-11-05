@@ -11,7 +11,8 @@ close to the robot (the wrist at 0.17 m over a disc top at 0.07). Here:
   ``wrist_reach_mm`` sideways, and ``wrist_clearance_mm`` over the tray, ``wrist_clearance_off_tray_mm`` elsewhere,
   the user's tested 20 mm and the 70 mm of 2026-11-02);
 - a held plug's bottom also stays ``clearance_mm`` above them;
-- the hand stays ``self_clearance_mm`` from the arm's own links (Franka's self-collision reflex, see wrist.self_clearance).
+- the hand stays ``self_clearance_mm`` from the arm's own links (Franka's self-collision reflex, see wrist.self_clearance);
+- the gripper contact point stays inside robot.workspace_m (the robot refuses targets outside it).
 
 The checks of the short moves at the plant and at the hole (approach, lift, insert) stay in 65 / 71: there the hand
 is meant to be among the plants.
@@ -91,6 +92,10 @@ class Scene:
         fl = pts["flange"][0]
         hand = np.array([fl + s * (Gp - fl) for s in (0.33, 0.67, 1.0)])  # the gripper body down to the fingers
         m["gripper"] = float((hand[:, 2] - self.height(hand) - p["clearance_mm"] / 1000).min())
+        # the robot refuses any target whose contact point lies outside robot.workspace_m (seedling.robot._validate):
+        # every pose of a path stays inside it (2026-11-04: a via pose 0.777 m high was refused, limit 0.60)
+        ws = self.cfg["robot"]["workspace_m"]
+        m["workspace"] = float(min(min(Gp[i] - ws[ax][0], ws[ax][1] - Gp[i]) for i, ax in enumerate("xyz")))
         if self.held_below is not None:
             stem = Gp + (T_BE @ self.G)[:3, 2] * self.fwd
             plug = np.array([stem[0], stem[1], stem[2] - self.held_below])
