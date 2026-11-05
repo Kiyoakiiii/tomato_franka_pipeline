@@ -238,15 +238,17 @@ def _run(args, cfg, py, grasp_dir, stop, log_file, log, run, go_on, load, plants
         free = [h for h in disc.get("free_holes", []) if h not in sim_taken]
         todo = [k for k in plants(grid) if k not in sim_removed and k not in args.skip.split(",")]
         if prev is not None and not args.dry_run:
-            cell, free_before = prev
+            cell, free_before, hole_ = prev
             ok_cell = cell not in grid.get("occupied", [])
-            ok_hole = len(free) < len(free_before)
+            # the hole it went into is no longer free (not the number of free holes: one photo may miss a hole the
+            # other sees, 2026-11-05: 4 holes seen before, 5 after, C9 in H1 judged not placed)
+            ok_hole = hole_ not in free
             log["rounds"][-1]["check"] = {"cell_empty": ok_cell, "hole_taken": ok_hole}
             if ok_cell and ok_hole:
                 done += 1
                 print(f"CHECK ok: {cell} is empty and a hole was taken ({done} transplanted)")
             else:
-                print(f"CHECK FAILED for {cell}: cell empty {ok_cell}, one more hole taken {ok_hole}: stopped "
+                print(f"CHECK FAILED for {cell}: cell empty {ok_cell}, H{hole_} taken {ok_hole}: stopped "
                       "(the plant may have slipped; please look)")
                 break
         # what a flat hand in a natural posture can reach at all (seedling.feasibility: a few IK solutions, seconds):
@@ -366,7 +368,7 @@ def _run(args, cfg, py, grasp_dir, stop, log_file, log, run, go_on, load, plants
         if rc != 0:
             print(f"the cycle for {k} stopped (exit {rc}): stopped here, the arm is where that step left it")
             break
-        prev = (k, free)
+        prev = (k, free, hole)
     log["done"] = done
     log_file.write_text(json.dumps(log, indent=1))
     print(f"TRANSPLANT RUN END: {done} plants {'planned' if args.dry_run else 'transplanted and checked'}; log {log_file.relative_to(PROJECT_DIR)}")
