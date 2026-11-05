@@ -62,9 +62,9 @@ def main() -> int:
     log_file = grasp_dir / f"transplant_all_{time.strftime('%Y%m%d_%H%M%S')}.json"
     log = {"rounds": []}
 
-    def run(cmd, quiet=False):
+    def run(cmd, quiet=False, env=None):
         if quiet:
-            r = subprocess.run([py, "-u", *cmd], cwd=PROJECT_DIR, capture_output=True, text=True)
+            r = subprocess.run([py, "-u", *cmd], cwd=PROJECT_DIR, capture_output=True, text=True, env=env)
             return r.returncode, r.stdout + r.stderr
         r = subprocess.run([py, "-u", *cmd], cwd=PROJECT_DIR)
         return r.returncode, ""
@@ -147,6 +147,64 @@ def _run(args, cfg, py, grasp_dir, stop, log_file, log, run, go_on, load, plants
     sim_removed, sim_taken = set(), set()
     discs_left = [args.dry_run_discs]
     failed = {}  # cell -> what was around it when its plan last failed
+    def select(grid, todo, free, removed, run_, out, failed_):
+        """the first plant of todo (in this order) with a safe grasp and placement: (chosen, no_place, error);
+        chosen = (cell, hole, heading text, pitches) or None"""
+        chosen, no_place = None, []
+        pitches = [float(x) for x in cfg["grasp"].get("side_pitch_deg", [26.0])]
+        for k in todo:
+            # a plant whose plan failed is planned again only when something changed around it: a plant within 15 cm
+            # taken away, or the free holes (a plan that cannot succeed took ~1 min every round, 2026-11-04)
+            ck = np.array(grid["cells"][k][:2])
+            key = (frozenset(j for j in todo if j != k and np.hypot(*(np.array(grid["cells"][j][:2]) - ck)) < 0.15), tuple(free))
+            if failed_ is not None and failed_.get(k) == key:
+                out(f"  {k}: not planned again (nothing changed around it since its plan failed)")
+                continue
+            obs = grasp_dir / f"{k}_observe.json"
+            if obs.exists():
+                obs.unlink()  # an old close-up of this cell is stale: the plan uses the overview's soil height
+            # the flattest safe grasp first; when the plant cannot be placed from it (the hand stays as flat while
+            # carrying and letting go), the grasp is planned again from the next steeper pitch
+            left = pitches
+            while left:
+                # planned from the observation pose the cycle goes to first (the cycle plans again from there after the
+                # close-up): a plan from the overview could pass where the one from the observation pose fails (2026-11-04, C7)
+                rg, og = run_(["scripts/65_side_grasp.py", "plan", "--from-observe", "--cell", k, "--lift-mm", str(args.lift_mm),
+                              "--ignore-cells", ",".join(sorted(removed)), "--pitch-deg", *map(str, left)], quiet=True)
+                if rg != 0:
+                    lines_ = og.splitlines()
+                    # the one-line verdicts of the steepest pitch tried (the full report of the fallback plan is long)
+                    why = [ln for ln in lines_ if "NOT SAFE at" in ln] or [ln for ln in lines_ if "not reachable" in ln or "in the way" in ln]
+                    if "Connection to FCI refused" in og or "NetworkException" in og:
+                        out("cannot connect to the robot (is FCI enabled in Desk?): stopped")
+                        out("\n".join(og.strip().splitlines()[-6:]))
+                        return None, no_place, True
+                    last = [ln for ln in og.splitlines() if ln.strip()]
+                    out(f"  {k}: no safe grasp now ({why[-1].strip() if why else (last[-1].strip()[:160] if last else 'refused')})")
+                    break
+                m = [re.search(r"pitched (-?\d+) deg down, heading ([-+]?\d+) deg", ln) for ln in og.splitlines() if ln.startswith("approach pitched")]
+                m = m[0] if m and m[0] else None
+                rp, op = run_(["scripts/71_place_in_disc.py", "plan", "--cell", k, "--free", ",".join(map(str, free)),
+                              "--ignore-cells", ",".join(sorted(removed))], quiet=True)
+                if rp == 0:
+                    hole = json.loads((grasp_dir / f"{k}_place_plan.json").read_text())["hole"]
+                    chosen = (k, hole, f"俯角 {m[1]}°，方向 {m[2]}°" if m else "", [p_ for p_ in left if m is None or p_ >= float(m[1])])
+                    out(f"  {k}: grasp pitched {m[1] if m else '?'} deg, heading {m[2] if m else '?'} deg, into H{hole}")
+                    break
+                why = [ln for ln in op.splitlines() if ln.strip()]
+                steeper = [p_ for p_ in left if m is not None and p_ > float(m[1])]
+                out(f"  {k}: grasp pitched {m[1] if m else '?'} deg ok, no safe placement from it ({why[-1].strip() if why else 'refused'})"
+                      + ("; trying steeper" if steeper else ""))
+                left = steeper
+                if not left:
+                    no_place.append(k)
+            if chosen is not None:
+                break
+            if failed_ is not None:
+                failed_[k] = key
+        return chosen, no_place, False
+
+    bg = None  # the next plant planned in the background while the arm moves the current one
     while True:
         if stop.exists():
             print("STOPPED on request")
@@ -219,57 +277,22 @@ def _run(args, cfg, py, grasp_dir, stop, log_file, log, run, go_on, load, plants
         if done >= args.max_plants:
             print(f"{done} plants done (--max-plants)")
             break
+        # the plan made in the background while the last plant was being moved (for the predicted state: that plant
+        # gone, its hole taken), when the state is as predicted
         chosen, no_place = None, []
-        pitches = [float(x) for x in cfg["grasp"].get("side_pitch_deg", [26.0])]
-        for k in todo:
-            # a plant whose plan failed is planned again only when something changed around it: a plant within 15 cm
-            # taken away, or the free holes (a plan that cannot succeed took ~1 min every round, 2026-11-04)
-            ck = np.array(grid["cells"][k][:2])
-            key = (frozenset(j for j in todo if j != k and np.hypot(*(np.array(grid["cells"][j][:2]) - ck)) < 0.15), tuple(free))
-            if failed.get(k) == key:
-                print(f"  {k}: not planned again (nothing changed around it since its plan failed)")
-                continue
-            obs = grasp_dir / f"{k}_observe.json"
-            if obs.exists():
-                obs.unlink()  # an old close-up of this cell is stale: the plan uses the overview's soil height
-            # the flattest safe grasp first; when the plant cannot be placed from it (the hand stays as flat while
-            # carrying and letting go), the grasp is planned again from the next steeper pitch
-            left = pitches
-            while left:
-                # planned from the observation pose the cycle goes to first (the cycle plans again from there after the
-                # close-up): a plan from the overview could pass where the one from the observation pose fails (2026-11-04, C7)
-                rg, og = run(["scripts/65_side_grasp.py", "plan", "--from-observe", "--cell", k, "--lift-mm", str(args.lift_mm),
-                              "--ignore-cells", ",".join(sorted(sim_removed)), "--pitch-deg", *map(str, left)], quiet=True)
-                if rg != 0:
-                    lines_ = og.splitlines()
-                    # the one-line verdicts of the steepest pitch tried (the full report of the fallback plan is long)
-                    why = [ln for ln in lines_ if "NOT SAFE at" in ln] or [ln for ln in lines_ if "not reachable" in ln or "in the way" in ln]
-                    if "Connection to FCI refused" in og or "NetworkException" in og:
-                        print("cannot connect to the robot (is FCI enabled in Desk?): stopped")
-                        print("\n".join(og.strip().splitlines()[-6:]))
-                        return 1
-                    last = [ln for ln in og.splitlines() if ln.strip()]
-                    print(f"  {k}: no safe grasp now ({why[-1].strip() if why else (last[-1].strip()[:160] if last else 'refused')})")
-                    break
-                m = [re.search(r"pitched (-?\d+) deg down, heading ([-+]?\d+) deg", ln) for ln in og.splitlines() if ln.startswith("approach pitched")]
-                m = m[0] if m and m[0] else None
-                rp, op = run(["scripts/71_place_in_disc.py", "plan", "--cell", k, "--free", ",".join(map(str, free)),
-                              "--ignore-cells", ",".join(sorted(sim_removed))], quiet=True)
-                if rp == 0:
-                    hole = json.loads((grasp_dir / f"{k}_place_plan.json").read_text())["hole"]
-                    chosen = (k, hole, f"俯角 {m[1]}°，方向 {m[2]}°" if m else "", [p_ for p_ in left if m is None or p_ >= float(m[1])])
-                    print(f"  {k}: grasp pitched {m[1] if m else '?'} deg, heading {m[2] if m else '?'} deg, into H{hole}")
-                    break
-                why = [ln for ln in op.splitlines() if ln.strip()]
-                steeper = [p_ for p_ in left if m is not None and p_ > float(m[1])]
-                print(f"  {k}: grasp pitched {m[1] if m else '?'} deg ok, no safe placement from it ({why[-1].strip() if why else 'refused'})"
-                      + ("; trying steeper" if steeper else ""))
-                left = steeper
-                if not left:
-                    no_place.append(k)
-            if chosen is not None:
-                break
-            failed[k] = key
+        if bg is not None:
+            bg["thread"].join()
+            c_ = bg.get("chosen")
+            if c_ is not None and bg.get("free") == free and bg.get("todo") == todo:
+                chosen = c_
+                print(f"  {c_[0]}: planned while the last plant was moved: grasp {c_[2]}, into H{c_[1]}")
+            elif c_ is not None:
+                print("  (the plan made in the background does not fit what is there now: planned again)")
+            bg = None
+        if chosen is None:
+            chosen, no_place, err = select(grid, todo, free, sim_removed, run, print, failed)
+            if err:
+                return 1
         if chosen is None:
             print("no plant left that can be grasped and placed safely: stopped")
             if no_place:
@@ -302,6 +325,26 @@ def _run(args, cfg, py, grasp_dir, stop, log_file, log, run, go_on, load, plants
         if not go_on(f"夹取 {k}，放进 H{hole}（{head}）"):
             break
         print(f">>> transplant {k} -> H{hole}", flush=True)
+        # the next plant planned meanwhile, for the state after this one (it gone from the tray, its hole taken), from
+        # the overview pose, by planning-only processes (no robot connection: SEEDLING_SIM_Q; no camera)
+        if done + 1 < args.max_plants:
+            import os
+            import threading
+
+            qf = PROJECT_DIR / ".tmp" / "overview_q.json"
+            qf.parent.mkdir(exist_ok=True)
+            qf.write_text(json.dumps({"q": cfg["tray"]["overview_q"]}))
+            env_bg = dict(os.environ, SEEDLING_SIM_Q=str(qf))
+            todo_n, free_n = [x for x in todo if x != k], [h for h in free if h != hole]
+            bg = {"todo": todo_n, "free": free_n, "lines": []}
+
+            def bg_plan(bg=bg, grid=grid, todo_n=todo_n, free_n=free_n, removed_n=sim_removed | {k}):
+                if todo_n and free_n:
+                    bg["chosen"] = select(grid, todo_n, free_n, removed_n, lambda c, quiet=True: run(c, quiet=True, env=env_bg),
+                                          bg["lines"].append, None)[0]
+
+            bg["thread"] = threading.Thread(target=bg_plan, daemon=True)
+            bg["thread"].start()
         rc, _ = run(["scripts/69_pick_cycle.py", "--cell", k, "--lift-mm", str(args.lift_mm), "--place", str(hole),
                      "--pitch-deg", *map(str, pitch_list)])
         if rc != 0:

@@ -428,7 +428,8 @@ def main() -> int:
             try:
                 old_ = json.loads(plan_file.read_text())
                 same_start = float(np.degrees(np.abs(np.array(old_["q"]["start"]) - q_now)).max()) < 1.0
-                if old_.get("safe") and same_start and "yaw" in old_:
+                same_cell = "cell_xy" in old_ and float(np.hypot(*(np.array(old_["cell_xy"]) - c[:2]))) < 0.002
+                if old_.get("safe") and same_start and same_cell and "yaw" in old_:
                     z_ff_ = finger_floor(float(old_["yaw"]))
                     z_new = max(z_close, z_ff_) if z_ff_ is not None else z_close
                     if abs(z_new - float(old_["close_point"][2])) < 0.003 and abs(float(old_.get("tray_top", -1)) - tray_top) < 0.002:
@@ -646,6 +647,7 @@ def main() -> int:
                                          **{f"{k_}_vias": [v.tolist() for v in q_down[k_]] for k_ in ("down", "approach", "lift")},
                                          "z_close": round(float(z_close), 4), "tray_top": round(tray_top, 4),
                                          "yaw": float(radial + np.radians(dyaw)), **(obs_from or {}),
+                                         "cell_xy": [float(v) for v in grid["cells"][args.cell][:2]],
                                          "safe": bool(ok)}, indent=1))
         print("plan saved" if ok else "plan saved but NOT SAFE: the motion phases will refuse it", plan_file.relative_to(PROJECT_DIR))
         return 0 if ok else 1
