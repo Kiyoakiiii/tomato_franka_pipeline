@@ -4,7 +4,8 @@ left). Each round:
 
 1. overview pose (68), locate tray and disc from one picture (60): stop if either is not found;
 2. the disc's free holes (a hole with a plug shows no red interior): none left -> done;
-3. the plants still in the tray, nearest the robot base first (a plug seen in the cell; cells whose only soil
+3. the plants still in the tray, the row nearest the robot first, within a row from right to left (as seen from the
+   robot) (a plug seen in the cell; cells whose only soil
    lies at the cell bottom, deeper than --scrap-depth-mm below the tray top, are soil scraps, not plugs);
    for each in turn a grasp plan (65, with an approach heading clear of the other plants) and a placement plan
    (71) are made without moving; the first plant with both safe is taken, the others wait for a later round
@@ -98,14 +99,20 @@ def main() -> int:
     def plants(grid):
         top = float(grid["z_top"])
         soil = grid.get("soil_z_overview") or {}
+        # the row nearest the robot first (its cells' mean distance from the base), within a row from right to left
+        # as seen from the robot (smallest base-frame y first) (user's rule, 2026-11-04)
+        cells = grid["cells"]
+        rows_ = {}
+        for k in cells:
+            rows_.setdefault(k[0], []).append(float(np.hypot(*cells[k][:2])))
+        row_dist = {r: float(np.mean(v)) for r, v in rows_.items()}
         out = []
         for k in grid.get("occupied", []):
             z = soil.get(k)
             if z is not None and z < top - args.scrap_depth_mm / 1000:
                 continue  # soil scraps at the cell bottom
-            x, y = grid["cells"][k][:2]
-            out.append((float(np.hypot(x, y)), k))
-        return [k for _, k in sorted(out)]
+            out.append((row_dist[k[0]], float(cells[k][1]), k))
+        return [k for *_, k in sorted(out)]
 
     done, prev = 0, None  # prev: (cell, free holes before) of the last cycle, to check it
     sim_removed, sim_taken = set(), set()
