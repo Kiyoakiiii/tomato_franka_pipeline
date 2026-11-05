@@ -117,8 +117,79 @@ def load_frame_any(path: str | Path) -> Frame:
     raise ValueError(f"unrecognised frame source: {path}")
 
 
+def save_in_background(jobs) -> None:
+    """Write frames without waiting: [(frame, path, save_png), ...] saved by a forked child (compressing a 26 MB frame
+    took ~1 s per file in the middle of every locate / close-up, 2026-11-04); in this process if fork is not possible"""
+    import os
+
+    try:
+        pid = os.fork()
+    except (OSError, AttributeError):
+        pid = -1
+    if pid == 0:  # the child: write and leave at once (no cleanup of the parent's resources)
+        try:
+            for f, path, png in jobs:
+                f.save(path, save_png=png)
+        finally:
+            os._exit(0)
+    if pid < 0:
+        for f, path, png in jobs:
+            f.save(path, save_png=png)
+
+
+class RemoteCamera:
+    """Frames from scripts/63_camera_server.py (the ZED kept open for a whole run)."""
+
+    def __init__(self, sock: str, cfg: dict):
+        self.sock, self.cfg = sock, cfg
+
+    def grab(self, n_average: int = 1, timeout_s: float = 15.0, with_right: bool = True) -> Frame:
+        import io
+        import socket
+        import struct
+
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout_s)
+        s.connect(self.sock)
+        try:
+            s.sendall((json.dumps({"n_average": int(n_average), "with_right": bool(with_right)}) + "\n").encode())
+            hdr = b""
+            while len(hdr) < 8:
+                hdr += s.recv(8 - len(hdr))
+            n = struct.unpack("<Q", hdr)[0]
+            chunks, got = [], 0
+            while got < n:
+                c = s.recv(min(1 << 22, n - got))
+                if not c:
+                    raise ConnectionError("camera server closed the connection")
+                chunks.append(c)
+                got += len(c)
+        finally:
+            s.close()
+        data = b"".join(chunks)
+        if data[:3] == b"ERR":
+            raise RuntimeError(f"camera server: {data[3:].decode(errors='replace')}")
+        d = np.load(io.BytesIO(data), allow_pickle=False)
+        fx, fy, cx, cy, w, h = d["intr"]
+        conf = d["conf"] if d["conf"].size else None
+        rgb_r = d["rgb_right"] if d["rgb_right"].size else None
+        return Frame(d["rgb"], d["xyz"], conf, Intrinsics(fx, fy, cx, cy, int(w), int(h)), json.loads(str(d["meta"])), rgb_right=rgb_r)
+
+    def close(self) -> None:
+        pass
+
+
 class ZedCamera:
-    """Thin pyzed wrapper returning metric XYZ in the IMAGE coordinate system."""
+    """Thin pyzed wrapper returning metric XYZ in the IMAGE coordinate system. With SEEDLING_CAMERA_SOCK set (a run of
+    72 with scripts/63_camera_server.py), a RemoteCamera instead: the camera stays open between pictures."""
+
+    def __new__(cls, cfg: dict, *a, **k):
+        import os
+
+        sock = os.environ.get("SEEDLING_CAMERA_SOCK")
+        if sock and os.path.exists(sock):
+            return RemoteCamera(sock, cfg)
+        return super().__new__(cls)
 
     def __init__(self, cfg: dict):
         try:

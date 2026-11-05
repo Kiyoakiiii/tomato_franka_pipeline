@@ -114,6 +114,35 @@ def main() -> int:
             out.append((row_dist[k[0]], float(cells[k][1]), k))
         return [k for *_, k in sorted(out)]
 
+    # the camera kept open for the whole run (scripts/63_camera_server.py): each script asks it for a picture instead
+    # of opening the ZED itself (each open + close took 3-20 s)
+    cam_srv = None
+    if not args.dry_run:
+        import os
+
+        sock = PROJECT_DIR / ".tmp" / "camera.sock"
+        cam_srv = subprocess.Popen([py, "-u", "scripts/63_camera_server.py", "--sock", str(sock)], cwd=PROJECT_DIR,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        t_end = time.time() + 30
+        while time.time() < t_end and cam_srv.poll() is None:
+            ln = cam_srv.stdout.readline()
+            if "camera server ready" in ln:
+                os.environ["SEEDLING_CAMERA_SOCK"] = str(sock)
+                break
+        else:
+            print("camera server did not start: the scripts open the camera themselves")
+    try:
+        return _run(args, cfg, py, grasp_dir, stop, log_file, log, run, go_on, load, plants)
+    finally:
+        if cam_srv is not None and cam_srv.poll() is None:
+            cam_srv.terminate()
+            try:
+                cam_srv.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                cam_srv.kill()
+
+
+def _run(args, cfg, py, grasp_dir, stop, log_file, log, run, go_on, load, plants) -> int:
     done, prev = 0, None  # prev: (cell, free holes before) of the last cycle, to check it
     sim_removed, sim_taken = set(), set()
     discs_left = [args.dry_run_discs]

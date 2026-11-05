@@ -101,7 +101,9 @@ def main() -> int:
     out = PROJECT_DIR / "experiments" / "tray" / now_id()
     out.mkdir(parents=True, exist_ok=True)
     if not args.frame:
-        frame.save(out / "frame", save_png=False)
+        from seedling.camera import save_in_background
+
+        save_in_background([(frame, out / "frame", False)])  # a record only: written without waiting
     if g.cells:
         cv2.imwrite(str(out / "cells.jpg"), draw_cells(frame, T_BC, g.cells))
     occ = occupied_cells(frame, T_BC, g.cells, g.z_top, cfg) if g.ok else {}

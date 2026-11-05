@@ -216,7 +216,9 @@ def main() -> int:
         f.save(out / f"{args.cell}_{tag}", save_png=False)
         # every close-up kept (the file above is overwritten per cell): training data for a stem fine-tune model
         (out / "closeups").mkdir(exist_ok=True)
-        f.save(out / "closeups" / f"{args.cell}_{tag}_{time.strftime('%Y%m%d_%H%M%S')}", save_png=False)
+        from seedling.camera import save_in_background
+
+        save_in_background([(f, out / "closeups" / f"{args.cell}_{tag}_{time.strftime('%Y%m%d_%H%M%S')}", False)])
         m = measure_plug(f, T_BC, c[:2], cfg)
         print(f"{tag}: soil " + (f"z {m['soil_z']:.3f} ({(m['soil_z'] - tray_top) * 1000:+.0f} mm vs the tray top), {m['n']} points" if m["ok"] else m["status"]))
         # where the stem leaves the soil: green points just above the soil near the cell centre (the plug sits at
@@ -399,6 +401,7 @@ def main() -> int:
             need = soilP[m, 2] + args.finger_clearance_mm / 1000 + 0.0145
             return float(np.percentile(need, 98))
 
+        accept_first = [False]
         # the plan made when this plant was chosen (72: from the predicted observation pose) is used as it is when the
         # arm is at that pose now and its closing point still comes out the same (within 3 mm, with the close-up's
         # soil and the neighbours' soil under the finger tracks) (2026-11-04: planning twice per plant cost ~15 s)
@@ -414,6 +417,11 @@ def main() -> int:
                               f"{abs(z_new - float(old_['close_point'][2])) * 1000:.0f} mm): used as it is")
                         return 0
                     print(f"planned again: the closing point moved {(z_new - float(old_['close_point'][2])) * 1000:+.0f} mm since the plant was chosen")
+                    # the heading chosen then (and its neighbours) first, and the first safe plan is taken
+                    d0 = float(np.degrees((float(old_["yaw"]) - radial + np.pi) % (2 * np.pi) - np.pi))
+                    hs = sorted(args.headings_deg, key=lambda h_: abs(h_ - d0))
+                    args.headings_deg[:] = hs
+                    accept_first[0] = True
             except Exception:  # noqa: BLE001  (an old plan file: plan again)
                 pass
 
@@ -437,7 +445,7 @@ def main() -> int:
         for pitch in pitches:
             pt = np.radians(pitch)
             for dyaw in args.headings_deg:
-                if (best is not None and best[2] <= 15.0) or _tt.time() > deadline:
+                if (best is not None and (best[2] <= 15.0 or accept_first[0])) or _tt.time() > deadline:
                     break  # a natural plan found (headings come straightest first), or the time is up
                 yaw = radial + np.radians(dyaw)
                 tag = f"pitch {pitch:g} deg, heading {dyaw:+.0f} deg"
