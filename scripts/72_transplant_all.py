@@ -43,6 +43,8 @@ def main() -> int:
     ap.add_argument("--scrap-depth-mm", type=float, default=30.0)
     ap.add_argument("--skip", default="", help="comma list of cells not to take (e.g. a plant just missed)")
     ap.add_argument("--dry-run", action="store_true", help="no motion, no picture: plan the sequence from the saved tray/disc files")
+    ap.add_argument("--dry-run-discs", type=int, default=1, help="dry run: when the disc is full, go on with an empty one in its place "
+                    "(as if swapped by hand), up to this many discs (with --max-plants large: every plant of the tray)")
     ap.add_argument("--pause", action="store_true", help="wait for space (go on) or q (stop) before the first move and before each plant")
     args = ap.parse_args()
     cfg = config_from_args(args)
@@ -107,6 +109,8 @@ def main() -> int:
 
     done, prev = 0, None  # prev: (cell, free holes before) of the last cycle, to check it
     sim_removed, sim_taken = set(), set()
+    discs_left = [args.dry_run_discs]
+    failed = {}  # cell -> what was around it when its plan last failed
     while True:
         if stop.exists():
             print("STOPPED on request")
@@ -146,6 +150,11 @@ def main() -> int:
                       "(the plant may have slipped; please look)")
                 break
         print(f"free holes {free}; plants left (nearest first) {todo}")
+        if not free and args.dry_run and todo and discs_left[0] > 1:
+            discs_left[0] -= 1
+            sim_taken.clear()
+            free = [h for h in disc.get("free_holes", [])]
+            print(f"DISC FULL: (dry run) an empty disc in its place, {discs_left[0]} left")
         if not free:
             print("DISC FULL")
             break
@@ -155,6 +164,13 @@ def main() -> int:
         chosen, no_place = None, []
         pitches = [float(x) for x in cfg["grasp"].get("side_pitch_deg", [26.0])]
         for k in todo:
+            # a plant whose plan failed is planned again only when something changed around it: a plant within 15 cm
+            # taken away, or the free holes (a plan that cannot succeed took ~1 min every round, 2026-11-04)
+            ck = np.array(grid["cells"][k][:2])
+            key = (frozenset(j for j in todo if j != k and np.hypot(*(np.array(grid["cells"][j][:2]) - ck)) < 0.15), tuple(free))
+            if failed.get(k) == key:
+                print(f"  {k}: not planned again (nothing changed around it since its plan failed)")
+                continue
             obs = grasp_dir / f"{k}_observe.json"
             if obs.exists():
                 obs.unlink()  # an old close-up of this cell is stale: the plan uses the overview's soil height
@@ -162,7 +178,9 @@ def main() -> int:
             # carrying and letting go), the grasp is planned again from the next steeper pitch
             left = pitches
             while left:
-                rg, og = run(["scripts/65_side_grasp.py", "plan", "--cell", k, "--lift-mm", str(args.lift_mm),
+                # planned from the observation pose the cycle goes to first (the cycle plans again from there after the
+                # close-up): a plan from the overview could pass where the one from the observation pose fails (2026-11-04, C7)
+                rg, og = run(["scripts/65_side_grasp.py", "plan", "--from-observe", "--cell", k, "--lift-mm", str(args.lift_mm),
                               "--ignore-cells", ",".join(sorted(sim_removed)), "--pitch-deg", *map(str, left)], quiet=True)
                 if rg != 0:
                     lines_ = og.splitlines()
@@ -170,13 +188,15 @@ def main() -> int:
                     why = [ln for ln in lines_ if "NOT SAFE at" in ln] or [ln for ln in lines_ if "not reachable" in ln or "in the way" in ln]
                     if "Connection to FCI refused" in og or "NetworkException" in og:
                         print("cannot connect to the robot (is FCI enabled in Desk?): stopped")
+                        print("\n".join(og.strip().splitlines()[-6:]))
                         return 1
                     last = [ln for ln in og.splitlines() if ln.strip()]
                     print(f"  {k}: no safe grasp now ({why[-1].strip() if why else (last[-1].strip()[:160] if last else 'refused')})")
                     break
                 m = [re.search(r"pitched (-?\d+) deg down, heading ([-+]?\d+) deg", ln) for ln in og.splitlines() if ln.startswith("approach pitched")]
                 m = m[0] if m and m[0] else None
-                rp, op = run(["scripts/71_place_in_disc.py", "plan", "--cell", k, "--free", ",".join(map(str, free))], quiet=True)
+                rp, op = run(["scripts/71_place_in_disc.py", "plan", "--cell", k, "--free", ",".join(map(str, free)),
+                              "--ignore-cells", ",".join(sorted(sim_removed))], quiet=True)
                 if rp == 0:
                     hole = json.loads((grasp_dir / f"{k}_place_plan.json").read_text())["hole"]
                     chosen = (k, hole, f"俯角 {m[1]}°，方向 {m[2]}°" if m else "", [p_ for p_ in left if m is None or p_ >= float(m[1])])
@@ -191,6 +211,7 @@ def main() -> int:
                     no_place.append(k)
             if chosen is not None:
                 break
+            failed[k] = key
         if chosen is None:
             print("no plant left that can be grasped and placed safely: stopped")
             if no_place:
@@ -201,6 +222,15 @@ def main() -> int:
         log["rounds"].append({"cell": k, "hole": hole, "free_before": free})
         log_file.write_text(json.dumps(log, indent=1))
         if args.dry_run:
+            # the way back to the overview after letting go (68 from the place plan's last pose)
+            q_ua = json.loads((grasp_dir / f"{k}_place_plan.json").read_text())["q"]["up after"]
+            r68, o68 = run(["scripts/68_goto_overview.py", "--dry-run", "--start-q", *map(str, q_ua),
+                            "--free", ",".join(str(h) for h in free if h != hole) or "0",
+                            "--ignore-cells", ",".join(sorted(sim_removed | {k}))], quiet=True)
+            if r68 != 0:
+                print(f"  {k}: (dry run) NO SAFE WAY BACK to the overview after H{hole}: "
+                      + next((ln.strip() for ln in o68.splitlines() if "NOT SAFE" in ln or "cannot" in ln), o68.strip()[-160:]))
+                break
             sim_removed.add(k)
             sim_taken.add(hole)
             done += 1

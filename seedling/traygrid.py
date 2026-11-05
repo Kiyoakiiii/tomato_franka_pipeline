@@ -75,6 +75,44 @@ def tray_top_candidates(frame: Frame, T_BC: np.ndarray, lo: float, hi: float, mi
     return sorted(high or out, reverse=True)
 
 
+def z_scan_candidates(frame: Frame, T_BC: np.ndarray, cfg: dict, step: float = 0.005, n: int = 3) -> list:
+    """Tray top heights to fit at: the grid template matched on the top view at every height of the search range
+    (step 5 mm, half-size pictures, at the tray's angle found once), the n best local maxima of the match. The
+    height histogram alone (tray_top_candidates) missed the tray top once the range reached the leaves (2026-11-04:
+    a raised tray needs a range up to 0.40 m, and leaf planes at 0.16-0.22 m crowded out the top at 0.147)."""
+    m = cfg["tray"]["model"]
+    lo, hi = m["top_z_search_m"]
+    rows, cols = int(m["rows"]), int(m["cols"])
+    p, wall, rim = float(m["pitch_m"]) * 1000, float(m["wall_m"]) * 1000, float(m["rim_m"]) * 1000
+    xr, yr = m["search_x_m"], m["search_y_m"]
+    t0 = _template(rows, cols, p, wall, rim)
+    t2 = cv2.resize(t0, (t0.shape[1] // 2, t0.shape[0] // 2), interpolation=cv2.INTER_AREA)
+    hist = tray_top_candidates(frame, T_BC, lo, hi, n=6)
+
+    def half(z):
+        I, _, _, _ = top_view(frame, T_BC, z, xr, yr, res=0.002)
+        return cv2.GaussianBlur(I, (0, 0), 0.5)
+
+    # the angle: the coarse sweep at the histogram peaks (the angle barely depends on the height)
+    ang0 = max((_match(half(z), t2, a)[0], a) for z in (hist[:3] or [(lo + hi) / 2]) for a in np.arange(-90.0, 90.0, 2.0))[1]
+    zs = np.arange(lo, hi + 1e-9, step)
+    sc = np.array([max(_match(half(z), t2, a)[0] for a in (ang0 - 2.0, ang0, ang0 + 2.0)) for z in zs])
+    peaks = [i for i in range(len(zs)) if (i == 0 or sc[i] >= sc[i - 1]) and (i == len(zs) - 1 or sc[i] >= sc[i + 1])]
+    # each refined to the dense depth there (median within 6 mm): the grid is periodic, and a fit 2-3 mm off the
+    # true top plane was shifted by a whole cell on some pictures (the scan step alone is not enough)
+    ok = np.isfinite(frame.xyz).all(-1)
+    zd = apply_T(T_BC, frame.xyz[ok])[:, 2]
+    out = []
+    for i in sorted(peaks, key=lambda i: -sc[i]):
+        near = zd[np.abs(zd - zs[i]) < 0.006]
+        z = float(np.median(near)) if len(near) >= 1000 else float(zs[i])
+        if all(abs(z - o) > 0.01 for o in out):
+            out.append(z)
+        if len(out) == n:
+            break
+    return out
+
+
 def top_view(frame: Frame, T_BC: np.ndarray, z: float, x_range, y_range, res: float = 0.001):
     """Grey image I[ix, iy] of the plane z = const (x along rows, y along columns) and a validity mask."""
     xs = np.arange(x_range[0], x_range[1], res)
@@ -111,7 +149,8 @@ def _match(I: np.ndarray, t0: np.ndarray, ang: float, window=None):
     m = cv2.warpAffine(np.ones_like(t0), M, (W2, H2), flags=cv2.INTER_NEAREST, borderValue=0)
     if t.shape[0] >= I.shape[0] or t.shape[1] >= I.shape[1]:
         return -1.0, M, (0.0, 0.0), m
-    R = np.nan_to_num(cv2.matchTemplate(I, t, cv2.TM_CCORR_NORMED, mask=m), nan=-1)
+    # where the picture is blank (outside the camera view) the normalised correlation divides by zero: inf, not a match
+    R = np.nan_to_num(cv2.matchTemplate(I, t, cv2.TM_CCORR_NORMED, mask=m), nan=-1, posinf=-1, neginf=-1)
     if window is not None:
         c0, half = window[0](M), window[1]
         W = np.full_like(R, -1)
@@ -140,7 +179,7 @@ def locate_tray(frame: Frame, T_BC: np.ndarray, cfg: dict, prior: dict | None = 
     rows, cols = int(m["rows"]), int(m["cols"])
     p, wall, rim = float(m["pitch_m"]) * 1000, float(m["wall_m"]) * 1000, float(m["rim_m"]) * 1000
     if prior is None and z_top is None:
-        cands = tray_top_candidates(frame, T_BC, *m["top_z_search_m"])
+        cands = z_scan_candidates(frame, T_BC, cfg)
         if len(cands) > 1:  # fit at each; a passing fit beats a failing one, then the better match
             fits = [locate_tray(frame, T_BC, cfg, z_top=zc) for zc in cands]
             best = max(fits, key=lambda g: (g.ok, g.score))

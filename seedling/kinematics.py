@@ -196,3 +196,70 @@ def solve_ik_near(
     if np.linalg.norm(r[:3]) <= pos_tol_m and np.degrees(np.linalg.norm(r[3:]) / rot_weight) <= rot_tol_deg:
         return q
     return None
+
+
+def ik_fixed_q7(target_T_BE: np.ndarray, q_seed: np.ndarray, q7: float, F_T_EE: np.ndarray = DEFAULT_F_T_EE,
+                limit_margin_rad: float = 0.05, iters: int = 80, pos_tol_m: float = 1e-3, rot_tol_deg: float = 0.5):
+    """IK with joint 7 held at q7 (the arm's one redundant degree of freedom): joints 1-6 by damped least squares
+    from q_seed. Joint angles or None."""
+    lo, hi = Q_MIN + limit_margin_rad, Q_MAX - limit_margin_rad
+    if not lo[6] <= q7 <= hi[6]:
+        return None
+    q = np.clip(np.asarray(q_seed, dtype=float), lo, hi)
+    q[6] = q7
+    rw = 0.2
+    for _ in range(iters):
+        r = _residual(q, target_T_BE, F_T_EE, rw)
+        if np.linalg.norm(r[:3]) < 2e-5 and np.linalg.norm(r[3:]) < 2e-5:
+            break
+        J = _jacobian(q, target_T_BE, F_T_EE, rw)[:, :6]
+        dq = -J.T @ np.linalg.solve(J @ J.T + 0.02 ** 2 * np.eye(6), r)
+        s = np.max(np.abs(dq))
+        if s > 0.3:
+            dq *= 0.3 / s
+        q[:6] = np.clip(q[:6] + dq, lo[:6], hi[:6])
+    r = _residual(q, target_T_BE, F_T_EE, rw)
+    if np.linalg.norm(r[:3]) <= pos_tol_m and np.degrees(np.linalg.norm(r[3:]) / rw) <= rot_tol_deg:
+        return q
+    return None
+
+
+def ik_all(target_T_BE: np.ndarray, F_T_EE: np.ndarray = DEFAULT_F_T_EE, seeds=(), limit_margin_rad: float = 0.05,
+           q7_step_deg: float = 10.0, dedupe_rad: float = 0.05, n_random: int = 48) -> list[np.ndarray]:
+    """Joint solutions covering the whole self-motion of the arm at this pose: joint 7 swept over its range in
+    q7_step_deg steps, each branch followed by continuation (the previous solution seeds the next q7) from every seed
+    (the given ones plus structured ones: base turned to the target, elbow and wrist variants). A seed that runs onto
+    a branch already found stops there."""
+    lo, hi = Q_MIN + limit_margin_rad, Q_MAX - limit_margin_rad
+    az = float(np.arctan2(target_T_BE[1, 3], target_T_BE[0, 3]))
+    base = [np.asarray(s, dtype=float) for s in seeds]
+    # every branch must get a seed: random ones over the whole joint box (a structured set missed the branch with
+    # joint 5 near -150 deg, 2026-11-04), deterministic
+    rng = np.random.default_rng(12345)
+    for _ in range(n_random):
+        q = rng.uniform(lo, hi)
+        q[0] = az + rng.uniform(-1.7, 1.7)
+        base.append(q)
+    grid = np.arange(lo[6], hi[6] + 1e-9, np.radians(q7_step_deg))
+    found: dict[int, list[np.ndarray]] = {}
+    out = []
+    rw = 0.2
+    for s in base:
+        # onto a branch first (all 7 joints free), then along it
+        q0 = _dls(np.clip(s, lo, hi), target_T_BE, F_T_EE, lo, hi, rw, iters=60)
+        r = _residual(q0, target_T_BE, F_T_EE, rw)
+        if np.linalg.norm(r[:3]) > 1e-3 or np.degrees(np.linalg.norm(r[3:]) / rw) > 0.5:
+            continue
+        i0 = int(np.argmin(np.abs(grid - q0[6])))
+        for direction in (1, -1):
+            prev = q0
+            for i in (range(i0, len(grid)) if direction > 0 else range(i0 - 1, -1, -1)):
+                q = ik_fixed_q7(target_T_BE, prev, float(grid[i]), F_T_EE, limit_margin_rad, iters=30)
+                if q is None:
+                    break  # the branch ends (a joint limit, or it folds away)
+                if any(np.abs(q - o).max() < dedupe_rad for o in found.get(i, [])):
+                    break  # on a branch already followed
+                found.setdefault(i, []).append(q)
+                out.append(q)
+                prev = q
+    return out

@@ -101,7 +101,51 @@ def _console_confirm(description: str) -> None:
         raise KeyboardInterrupt("aborted by operator")
 
 
+SIM_ENV = "SEEDLING_SIM_Q"
+
+
+class PlanningOnlyRobot(RobotBase):
+    """What FrankyRobot gives when the environment variable SEEDLING_SIM_Q names a JSON file with "q" (the layout
+    simulation, scripts/74): it reports those joints, never imports franky nor connects to the robot, and refuses
+    every motion. (A sitecustomize stand-in used before 2026-11-04 was sometimes overwritten during the import, and
+    the planning scripts then connected to the real robot: they only read its joints.)"""
+
+    def __init__(self, cfg: dict, step_mode: bool = False, confirm_fn=None):
+        import json
+        import os
+
+        super().__init__(cfg, step_mode, confirm_fn)
+        self._q = np.array(json.load(open(os.environ[SIM_ENV]))["q"], float)
+
+    def q(self):
+        return self._q.copy()
+
+    def T_BE(self):
+        return kinematics.fk(self._q, self.F_T_EE)
+
+    def external_force(self):
+        return np.zeros(3)
+
+    def has_errors(self) -> bool:
+        return False
+
+    def _refuse(self, *a, **k):
+        raise SystemExit("planning-only robot (SEEDLING_SIM_Q is set): no motion")
+
+    move_to_pose = move_contact_to = move_joints = recover = _refuse
+
+    def close(self) -> None:
+        pass
+
+
 class FrankyRobot(RobotBase):
+    def __new__(cls, *a, **k):
+        import os
+
+        if os.environ.get(SIM_ENV):
+            return PlanningOnlyRobot(*a, **k)
+        return super().__new__(cls)
+
     def __init__(self, cfg: dict, step_mode: bool = True, confirm_fn=None):
         super().__init__(cfg, step_mode, confirm_fn)
         import franky

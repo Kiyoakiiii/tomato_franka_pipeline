@@ -33,6 +33,7 @@ def main() -> int:
     ap.add_argument("--cell", required=True, help="the cell the plant came from (its grasp plan)")
     ap.add_argument("--hole", type=int, default=None, help="disc hole 1..6 as drawn on the overview overlay (default: nearest the robot)")
     ap.add_argument("--free", default=None, help="comma list of the free holes (default: as seen on the last overview)")
+    ap.add_argument("--ignore-cells", default="", help="comma list: cells known to be empty now (not obstacles)")
     ap.add_argument("--plug-mm", type=float, default=40.0, help="plug height")
     ap.add_argument("--insert-mm", type=float, default=0.0, help="plug bottom this far into the hole before letting go (0: level "
                     "with the disc top, the hole guides it down; 18 until 2026-10-28: the wrist came down to the tray's edge)")
@@ -43,20 +44,22 @@ def main() -> int:
     ap.add_argument("--up-mm", type=float, default=100.0, help="then up")
     ap.add_argument("--finger-bottom-mm", type=float, default=14.5, help="finger bottom below the closing point")
     ap.add_argument("--wrist-clearance-mm", type=float, default=None, help="default grasp.side_wrist_clearance_mm (as for the grasp)")
-    ap.add_argument("--headings-deg", type=float, nargs="+", default=[0, -15, 15, -30, 30, -45, 45, -60, 60],
+    ap.add_argument("--headings-deg", type=float, nargs="+", default=[0.0] + [s_ * d_ for d_ in range(10, 91, 10) for s_ in (-1, 1)],
                     help="hand headings over the hole, relative to straight out from the robot, tried in turn")
     ap.add_argument("--wrist-clearance-off-tray-mm", type=float, default=None,
                     help="the same away from the tray (over the disc and the table): default grasp.side_wrist_clearance_off_tray_mm")
     ap.add_argument("--wrist-reach-mm", type=float, default=80.0, help="the wrist housings reach this far sideways: the surface "
                     "within it counts as under them (the joint 5/6 housing hit the tray's edge from 80 mm beside it)")
-    ap.add_argument("--ik-tries", type=int, default=12, help="more IK solutions of the across pose (random starts) when the one near the lift pose fails")
-    ap.add_argument("--max-branches", type=int, default=4, help="of those (same family), how many are tried, least joint change first")
+    ap.add_argument("--max-branches", type=int, default=8, help="of all joint solutions of the across pose (same family, joint 7 swept), "
+                    "how many are tried per hole and heading, least joint change first")
     ap.add_argument("--max-raise-mm", type=float, default=30.0, help="let go up to this much higher when the wrist would come too close to the disc")
     ap.add_argument("--tray-plants-mm", type=float, default=50.0, help="while carrying, the plug bottom this far above the tray top where over the tray")
     ap.add_argument("--placed-plant-mm", type=float, default=150.0, help="plants already in the disc: this tall above the disc top")
     ap.add_argument("--placed-plant-radius-mm", type=float, default=40.0, help="... and the hand keeps this far from their stems")
     ap.add_argument("--camera-clearance-mm", type=float, default=20.0)
     ap.add_argument("--self-clearance-mm", type=float, default=90.0, help="hand from the arm's own upper arm and forearm (see 65)")
+    ap.add_argument("--path-time-s", type=float, default=12.0, help="random-tree path search time for the carry across (all holes "
+                    "and headings together; each search at most a quarter of it), when no straight or one-via path is safe")
     ap.add_argument("--dynamics", type=float, default=None, help="one factor for all moves (default: robot.dynamics / fine_dynamics in the config)")
     args = ap.parse_args()
     cfg = config_from_args(args)
@@ -74,6 +77,8 @@ def main() -> int:
     from seedling.config import ee_to_contact, flange_to_ee
     from seedling.robot import FrankyRobot
     from seedling.transforms import inv_T, make_T
+    from seedling.motion import find_path, lift_then_path
+    from seedling.scene import Scene
     from seedling.wrist import Surfaces, body_points_B, path_self_clearance, self_clearance
 
     T_FC, _ = load_T_FC(cfg)
@@ -217,6 +222,20 @@ def main() -> int:
                     f"camera {cc * 1000:.0f} mm over what lies below; grasp centre down to {lg:.3f}" + (f"  <-- TOO LOW {bad}" if bad else ""))
             return not bad, line
 
+        gone = set(filter(None, args.ignore_cells.split(",")))
+        scene = Scene(grid, disc, cfg, T_FC, tray_plants=[k for k in (grid.get("planted") or grid.get("occupied", []))
+                                                          if k != args.cell and k not in gone],
+                      taken_holes=[h for h in range(1, len(holes) + 1) if h not in free], held_below_m=below, hold_forward_m=fwd)
+
+        q_ov = np.array(cfg["tray"]["overview_q"], float)
+
+        def scene_back(hole):
+            return Scene(grid, disc, cfg, T_FC, tray_plants=[k for k in (grid.get("planted") or grid.get("occupied", []))
+                                                             if k != args.cell and k not in gone],
+                         taken_holes=[h for h in range(1, len(holes) + 1) if h not in free or h == hole])
+
+        rrt_left = [args.path_time_s]
+
         def plan_hole(hi, dyaw, raise_m=0.0):
             """joints for up, across, [above], insert, back, up after (+ via); or None and why. The plant is let go
             raise_m higher than --insert-mm when the wrist would otherwise come too close to the disc. Carried across
@@ -248,15 +267,13 @@ def main() -> int:
             fail, seen = None, []
 
             def candidates():
+                # ALL joint solutions of the across pose (kinematics.ik_all: joint 7 swept on every branch), the one
+                # reached straight from the lift pose first, then the least joint change from the up pose
                 q0 = ik(T_ac, q_up)
                 if q0 is not None:
                     yield q0
-                more = []
-                for k in range(1, args.ik_tries + 1):
-                    start = q_up if k == 1 else np.random.default_rng(k).uniform(kinematics.Q_MIN, kinematics.Q_MAX)
-                    q = kinematics.solve_ik(T_ac @ inv_T(G), start, F, margin, n_random_seeds=0 if k > 1 else 4, rng_seed=k)
-                    if q is not None and np.linalg.norm(G_of(q)[:3, 3] - T_ac[:3, 3]) <= 0.0015:
-                        more.append(q)
+                more = [q for q in kinematics.ik_all(T_ac @ inv_T(G), F, seeds=[q_up], limit_margin_rad=margin)
+                        if np.linalg.norm(G_of(q)[:3, 3] - T_ac[:3, 3]) <= 0.0015]
                 yield from sorted(more, key=lambda q_: float(np.abs(q_ - q_up).max()))
 
             for q_ac in candidates():
@@ -296,15 +313,33 @@ def main() -> int:
                 ok_up, l_up = move_check("up", q_lift, q_up)
                 if not ok_up:
                     return None, [l_up]  # the same for every hole and heading
-                ok, l_ac = move_check("across", q_up, q_ac)
-                if ok:
-                    return qs, [l_up, l_ac] + [lines[n_] for n_ in names]
-                fail = [l_up, l_ac]
-                for qv in (np.r_[q_up[:4], q_ac[4:]], np.r_[q_ac[:4], q_up[4:]]):
-                    ok1, l1 = move_check("via", q_up, qv)
-                    ok2, l2 = move_check("across", qv, q_ac) if ok1 else (False, "")
-                    if ok1 and ok2:
-                        return {**qs, "via": qv}, [l_up, l1, l2] + [lines[n_] for n_ in names]
+                # the carry across: a path found by seedling.motion (straight, one via, or a random-tree search), every
+                # pose clear of what is around (seedling.scene, with the held plug: tray, disc, the plants in both)
+                import time as _t
+
+                t0 = _t.time()
+                path = find_path(q_up, q_ac, scene.free_ok, time_s=min(args.path_time_s / 4, rrt_left[0]))
+                rrt_left[0] = max(0.0, rrt_left[0] - (_t.time() - t0))
+                if path is None:
+                    m_, part_ = scene.worst(q_up, q_ac)
+                    fail = [l_up, f"  across   : max joint change {np.degrees(np.abs(q_ac - q_up)).max():5.1f} deg; no safe path (straight: "
+                                  f"smallest margin {m_ * 1000:+.0f} mm, {part_})  <-- TOO LOW ['{part_}']"]
+                    continue
+                ls, qa_ = [], q_up
+                for i_, qb_ in enumerate(path):
+                    m_, part_ = scene.worst(qa_, qb_)
+                    ls.append(f"  {'via' if i_ < len(path) - 1 else 'across':9s}: max joint change {np.degrees(np.abs(qb_ - qa_)).max():5.1f} deg; "
+                              f"smallest margin {m_ * 1000:+.0f} mm ({part_}) over the tray, disc, plants and the arm itself")
+                    qa_ = qb_
+                # and the way back to the overview after letting go (as 68 will plan it: this hole taken, the plant gone
+                # from the tray): a placement that leaves the arm where it cannot get back is no placement (2026-11-04
+                # simulation: the hand 0 mm too close to the arm after the lift)
+                back_steps, back_msg = lift_then_path(qs["up after"], q_ov, scene_back(hi + 1), cfg, T_FC, time_s=6.0)
+                if back_steps is None:
+                    fail = [l_up] + ls + [f"  way back : no safe way back to the overview ({back_msg})  <-- TOO LOW ['no way back']"]
+                    continue
+                ls.append(f"  way back : {back_msg}, {len(back_steps)} moves to the overview")
+                return ({**qs, "vias": np.array(path[:-1])} if len(path) > 1 else qs), [l_up] + ls + [lines[n_] for n_ in names]
             return None, fail or [f"H{hi + 1}: not reachable (across)"]
 
         if q_up is None:
@@ -382,7 +417,12 @@ def main() -> int:
     if args.phase == "carry":
         if not at("start"):
             return 1
-        for name in [k for k in ("up", "via", "across", "above") if k in q]:
+        if not move(q["up"], args.dynamics, "up"):
+            return 1
+        for i_, qv in enumerate(q.get("vias", [])):  # via poses of the path search
+            if not move(qv, args.dynamics, f"via {i_ + 1}/{len(q['vias'])}"):
+                return 1
+        for name in [k for k in ("across", "above") if k in q]:
             if not move(q[name], args.dynamics, name):
                 return 1
         return 0

@@ -114,7 +114,7 @@ def _from_outer_rim(frame, T_BC, XYZ, hsv, red, ok, z_top, g, prior, n_good) -> 
             "from_outer_rim": True}
 
 
-def locate_disc(frame: Frame, T_BC: np.ndarray, area=(0.30, 0.95, -0.50, 0.50), geom: dict | None = None,
+def locate_disc(frame: Frame, T_BC: np.ndarray, area=(0.30, 0.95, -0.50, 0.50), max_top_z: float = 0.45, geom: dict | None = None,
                 prior: dict | None = None) -> dict:
     g = {**DISC, **(geom or {})}
     hsv = cv2.cvtColor(frame.rgb, cv2.COLOR_RGB2HSV)
@@ -123,7 +123,7 @@ def locate_disc(frame: Frame, T_BC: np.ndarray, area=(0.30, 0.95, -0.50, 0.50), 
     XYZ[ok] = apply_T(T_BC, frame.xyz[ok])
     x0, x1, y0, y1 = area
     with np.errstate(invalid="ignore"):
-        inarea = ok & (XYZ[..., 0] > x0) & (XYZ[..., 0] < x1) & (XYZ[..., 1] > y0) & (XYZ[..., 1] < y1) & (XYZ[..., 2] < 0.20)
+        inarea = ok & (XYZ[..., 0] > x0) & (XYZ[..., 0] < x1) & (XYZ[..., 1] > y0) & (XYZ[..., 1] < y1) & (XYZ[..., 2] < max_top_z)
     red = ((hsv[..., 0] < 20) | (hsv[..., 0] > 170)) & (hsv[..., 1] > 120) & (hsv[..., 2] > 100)
     # hole interiors often lack depth (deep, steep walls): the area test is per blob (its pixels with depth), not per pixel
     m0 = cv2.morphologyEx(red.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))

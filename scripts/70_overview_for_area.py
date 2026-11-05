@@ -26,7 +26,8 @@ def main() -> int:
     ap = base_parser(__doc__)
     ap.add_argument("--area", type=float, nargs=4, default=[0.35, 0.85, -0.45, 0.45], metavar=("X0", "X1", "Y0", "Y1"),
                     help="work area in the base frame (m)")
-    ap.add_argument("--area-z", type=float, nargs=2, default=[0.02, 0.12], help="height range of what lies in it (m)")
+    ap.add_argument("--area-z", type=float, nargs=2, default=[0.0, 0.20], help="height range of what lies in it (m): a tray "
+                    "raised up to 20 cm (2026-11-04: from [0.02, 0.12]; one view covers the whole default area only up to 0.20)")
     ap.add_argument("--elevations", type=float, nargs="+", default=[70, 65, 60, 75, 55, 80],
                     help="view angles down from horizontal, preferred first")
     ap.add_argument("--margin-px", type=float, default=40.0)
@@ -124,6 +125,7 @@ def main() -> int:
         ok &= not bad
         print(f"{name}: max joint change {np.degrees(np.abs(qb - qa)).max():.0f} deg, lowest {part} z={lo:.3f}" + ("  <-- TOO LOW" if bad else ""))
     print("joint change (deg):", np.round(np.degrees(q1 - q0)).astype(int).tolist())
+    print("new overview joints:", "[" + ", ".join(f"{x:.3f}" for x in q1) + "]")
     print(f"new overview: camera {np.round(T[:3, 3], 3).tolist()}, looking down {el:g} deg from {d:.2f} m, "
           f"far edge {px_cell:.0f} px per cell")
     if args.dry_run or not ok:

@@ -58,7 +58,7 @@ def main() -> int:
                   ("insert into the hole", ["scripts/71_place_in_disc.py", "insert", *c]),
                   ("open", ["scripts/66_gripper.py", "open"]),
                   ("retreat", ["scripts/71_place_in_disc.py", "retreat", *c]),
-                  ("back to the overview", ["scripts/68_goto_overview.py"])]
+                  ("back to the overview", ["scripts/68_goto_overview.py", "--after-place", args.cell])]
     elif args.put_back:
         steps += [("put back", ["scripts/65_side_grasp.py", "lower", *c]),
                   ("open", ["scripts/66_gripper.py", "open"]),
