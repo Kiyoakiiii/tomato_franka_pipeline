@@ -123,7 +123,7 @@ def main() -> int:
                 print("cannot go to the overview pose: stopped")
                 break
             rc, out = run(["scripts/60_tray_locate.py"], quiet=True)
-            print("\n".join(ln[:200] for ln in out.splitlines() if ln.startswith(("grid", "disc", "overlay")) or "cells with" in ln))
+            print("\n".join(ln[:200] for ln in out.splitlines() if ln.startswith(("grid", "disc", "overlay", "cross-check", "CORRECTED", "REJECTED")) or "cells with" in ln))
             if rc != 0:
                 err = [ln for ln in out.splitlines() if ln.startswith(("RuntimeError", "FileNotFoundError")) or "Exception:" in ln]
                 if err:
