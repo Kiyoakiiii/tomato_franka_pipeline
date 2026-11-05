@@ -344,6 +344,9 @@ def main() -> int:
             # leaves over the plug: the fingers' bottom at the soil, so they pinch the stem where it leaves the soil
             height = min(height, args.height_leafy_mm)
             print(f"leaves cover {cov * 100:.0f}% of the plug top: closing {height:.1f} mm above the soil (finger bottom at it)")
+        # the highest closing point this plant may get: the estimated height (what the plan made when the plant was chosen,
+        # before the close-up, was checked at); raised up to it only when the gripper is too close to the tray there
+        z_cap = soil_z + max(args.height_mm, height) / 1000.0
         args.height_mm = height  # used in the messages below
         z_close = max(soil_z + height / 1000.0, tray_top + args.rim_clearance_mm / 1000.0)
         stem = (obs or {}).get("stem")
@@ -484,31 +487,39 @@ def main() -> int:
                         raised.add(dyaw)
                         print(f"  heading {dyaw:+.0f} deg: closing point raised {(z_c - z_close) * 1000:.0f} mm so the open fingers clear the "
                               f"neighbouring soil by {args.finger_clearance_mm:.0f} mm")
-                close_pt = np.array([c[0], c[1], z_c]) + a_h * off[0] / 1000.0 + across * off[1] / 1000.0
-                grasp = close_pt - a * fwd  # the open gap centre: the fingers swing forward onto close_pt
-                pre = grasp - a * args.standoff_mm / 1000.0
-                lift = grasp + [0, 0, args.lift_mm / 1000.0]
-                # every joint solution of the grasp pose (kinematics.ik_all: joint 7 swept on every branch), clear at the
-                # grasp itself; the most natural ones first (posture cost: how far the base is turned from the plant,
-                # the elbow swung sideways, the wrist twisted). Close to the robot a flat hand has no natural solution
-                # at all (joint 6 at its limit): then the least twisted one (2026-11-04: the first-found solution had
-                # the base 70 deg away from the plant)
-                T_gr, cands, why_g = make_T(R, grasp), [], []
-                for q_g in kinematics.ik_all(T_gr @ inv_T(G), F, seeds=[q_now], limit_margin_rad=margin):
-                    if np.linalg.norm(G_of(q_g)[:3, 3] - grasp) > 0.0015:
-                        continue
-                    cl_ = world.clearances(q_g, fingers=False, plants=False)
-                    mg = min(v_[0] for v_ in cl_.values())
-                    if mg < 0:
-                        w_ = min(cl_.values(), key=lambda v_: v_[0])
-                        if not why_g or w_[0] > why_g[0][0]:
-                            why_g[:] = [w_]
-                    if mg >= 0:
-                        pc_g = cartesian.posture_cost(q_g, c[:2])
-                        if pc_g <= max_posture:
-                            cands.append((pc_g, q_g))
-                        else:
-                            over_limit[0] = min(over_limit[0], pc_g)
+                # the gripper too close to the tray / table at the grasp (the close-up's lower closing point, 2026-11-05: C9
+                # 1 mm short at every heading): the closing point raised by what is missing, at most to z_cap
+                for _raise in range(4):
+                    close_pt = np.array([c[0], c[1], z_c]) + a_h * off[0] / 1000.0 + across * off[1] / 1000.0
+                    grasp = close_pt - a * fwd  # the open gap centre: the fingers swing forward onto close_pt
+                    pre = grasp - a * args.standoff_mm / 1000.0
+                    lift = grasp + [0, 0, args.lift_mm / 1000.0]
+                    # every joint solution of the grasp pose (kinematics.ik_all: joint 7 swept on every branch), clear at the
+                    # grasp itself; the most natural ones first (posture cost: how far the base is turned from the plant,
+                    # the elbow swung sideways, the wrist twisted). Close to the robot a flat hand has no natural solution
+                    # at all (joint 6 at its limit): then the least twisted one (2026-11-04: the first-found solution had
+                    # the base 70 deg away from the plant)
+                    T_gr, cands, why_g = make_T(R, grasp), [], []
+                    for q_g in kinematics.ik_all(T_gr @ inv_T(G), F, seeds=[q_now], limit_margin_rad=margin):
+                        if np.linalg.norm(G_of(q_g)[:3, 3] - grasp) > 0.0015:
+                            continue
+                        cl_ = world.clearances(q_g, fingers=False, plants=False)
+                        mg = min(v_[0] for v_ in cl_.values())
+                        if mg < 0:
+                            w_ = min(cl_.values(), key=lambda v_: v_[0])
+                            if not why_g or w_[0] > why_g[0][0]:
+                                why_g[:] = [w_]
+                        if mg >= 0:
+                            pc_g = cartesian.posture_cost(q_g, c[:2])
+                            if pc_g <= max_posture:
+                                cands.append((pc_g, q_g))
+                            else:
+                                over_limit[0] = min(over_limit[0], pc_g)
+                    low_ = bool(why_g) and why_g[0][1].endswith(("- tray", "- table")) and not cands
+                    if not low_ or z_c - why_g[0][0] + 0.001 > z_cap + 1e-6:
+                        break
+                    print(f"  {tag}: closing point raised {(-why_g[0][0] + 0.001) * 1000:.0f} mm ({why_g[0][1]} {why_g[0][0] * 1000:+.0f} mm at the grasp)")
+                    z_c -= why_g[0][0] - 0.001
                 cands.sort(key=lambda c_: c_[0])
                 if not cands:
                     print(f"  {tag}: no joint solution clear at the grasp itself" + (f" ({why_g[0][1]}: {why_g[0][0] * 1000:+.0f} mm)" if why_g else ""))

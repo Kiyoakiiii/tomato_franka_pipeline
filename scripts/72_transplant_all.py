@@ -147,6 +147,11 @@ def _run(args, cfg, py, grasp_dir, stop, log_file, log, run, go_on, load, plants
     sim_removed, sim_taken = set(), set()
     discs_left = [args.dry_run_discs]
     failed = {}  # cell -> what was around it when its plan last failed
+    def fail_key(grid, todo, free, k):
+        """what is around plant k: the plants within 15 cm and the free holes"""
+        ck = np.array(grid["cells"][k][:2])
+        return (frozenset(j for j in todo if j != k and np.hypot(*(np.array(grid["cells"][j][:2]) - ck)) < 0.15), tuple(free))
+
     def select(grid, todo, free, removed, run_, out, failed_):
         """the first plant of todo (in this order) with a safe grasp and placement: (chosen, no_place, error);
         chosen = (cell, hole, heading text, pitches) or None"""
@@ -155,8 +160,7 @@ def _run(args, cfg, py, grasp_dir, stop, log_file, log, run, go_on, load, plants
         for k in todo:
             # a plant whose plan failed is planned again only when something changed around it: a plant within 15 cm
             # taken away, or the free holes (a plan that cannot succeed took ~1 min every round, 2026-11-04)
-            ck = np.array(grid["cells"][k][:2])
-            key = (frozenset(j for j in todo if j != k and np.hypot(*(np.array(grid["cells"][j][:2]) - ck)) < 0.15), tuple(free))
+            key = fail_key(grid, todo, free, k)
             if failed_ is not None and failed_.get(k) == key:
                 out(f"  {k}: not planned again (nothing changed around it since its plan failed)")
                 continue
@@ -205,14 +209,16 @@ def _run(args, cfg, py, grasp_dir, stop, log_file, log, run, go_on, load, plants
         return chosen, no_place, False
 
     bg = None  # the next plant planned in the background while the arm moves the current one
+    skipped_last = False  # the last plant left after its close-up (no plan): back to the overview without asking
     while True:
         if stop.exists():
             print("STOPPED on request")
             break
         if not args.dry_run:
-            if prev is None and not go_on("回总览位，拍照定位托盘和圆盘"):
+            if prev is None and not skipped_last and not go_on("回总览位，拍照定位托盘和圆盘"):
                 break
             print(">>> overview and locate", flush=True)
+            skipped_last = False
             if run(["scripts/68_goto_overview.py"])[0] != 0:
                 print("cannot go to the overview pose: stopped")
                 break
@@ -347,6 +353,16 @@ def _run(args, cfg, py, grasp_dir, stop, log_file, log, run, go_on, load, plants
             bg["thread"].start()
         rc, _ = run(["scripts/69_pick_cycle.py", "--cell", k, "--lift-mm", str(args.lift_mm), "--place", str(hole),
                      "--pitch-deg", *map(str, pitch_list)])
+        if rc == 3:
+            # its plan failed after the close-up, nothing touched: left for now (planned again when something around
+            # it changes), the next plant chosen from the overview
+            print(f"the cycle for {k} found no safe plan after the close-up (nothing touched): {k} left for now, on with the next")
+            failed[k] = fail_key(grid, todo, free, k)
+            if bg is not None:
+                bg["thread"].join()
+                bg = None  # planned for {k} gone: does not fit
+            prev, skipped_last = None, True
+            continue
         if rc != 0:
             print(f"the cycle for {k} stopped (exit {rc}): stopped here, the arm is where that step left it")
             break

@@ -72,7 +72,8 @@ def main() -> int:
         r = subprocess.run([py, "-u", *cmd], cwd=PROJECT_DIR)
         if r.returncode != 0:
             print(f"step {i} ({name}) failed or refused (exit {r.returncode}): cycle stopped", flush=True)
-            return 1
+            # exit 3: no plan, the plant not touched (the arm at most at the observation pose): 72 goes on with another
+            return 3 if name in ("plan", "plan the placement") else 1
         if name == "lift" and args.hold_s > 0:
             time.sleep(args.hold_s)
     print("CYCLE DONE", flush=True)
