@@ -11,7 +11,7 @@ left). Each round:
    (71) are made without moving; the first plant with both safe is taken, the others wait for a later round
    (a plant behind others often becomes reachable once those are gone);
 4. the full cycle for it (69 --place): observe, grasp, lift, carry, insert, open, retreat, overview;
-5. check on the next overview picture: its cell must be empty and one more hole taken. Otherwise stop (the
+5. check on the next overview picture: its cell must be empty and the hole it went into no longer free. Otherwise stop (the
    gripper cannot feel whether it holds the plant: only the picture tells).
 
 touch experiments/grasp/STOP to stop after the current step (the running cycle stops at its next step).
