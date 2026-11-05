@@ -153,7 +153,8 @@ def main() -> int:
         # told before anything moves, with what to change; those plants / holes are not planned
         from seedling.feasibility import check_layout
 
-        feas = check_layout(grid, disc, todo, free, cfg)
+        # only when twisted postures are not allowed (grasp.max_posture_deg <= 60): with them allowed the plans decide
+        feas = check_layout(grid, disc, todo, free, cfg) if float(cfg["grasp"].get("max_posture_deg", 60.0)) <= 60.0 else {"plants": {}, "holes": {}}
         bad_p = {k: v for k, v in feas["plants"].items() if v}
         bad_h = {h: v for h, v in feas["holes"].items() if v}
         if bad_p or bad_h:
@@ -170,8 +171,6 @@ def main() -> int:
             if not todo or not free:
                 print("nothing can be done in this layout: change it as suggested above")
                 break
-        elif bad_p or bad_h:
-            print("  (these need a twisted posture: planned with the least twisted safe one)")
         print(f"free holes {free}; plants left (nearest first) {todo}")
         if not free and args.dry_run and todo and discs_left[0] > 1:
             discs_left[0] -= 1
