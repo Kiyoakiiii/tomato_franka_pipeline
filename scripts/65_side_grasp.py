@@ -399,6 +399,24 @@ def main() -> int:
             need = soilP[m, 2] + args.finger_clearance_mm / 1000 + 0.0145
             return float(np.percentile(need, 98))
 
+        # the plan made when this plant was chosen (72: from the predicted observation pose) is used as it is when the
+        # arm is at that pose now and its closing point still comes out the same (within 3 mm, with the close-up's
+        # soil and the neighbours' soil under the finger tracks) (2026-11-04: planning twice per plant cost ~15 s)
+        if plan_file.exists() and not args.from_observe:
+            try:
+                old_ = json.loads(plan_file.read_text())
+                same_start = float(np.degrees(np.abs(np.array(old_["q"]["start"]) - q_now)).max()) < 1.0
+                if old_.get("safe") and same_start and "yaw" in old_:
+                    z_ff_ = finger_floor(float(old_["yaw"]))
+                    z_new = max(z_close, z_ff_) if z_ff_ is not None else z_close
+                    if abs(z_new - float(old_["close_point"][2])) < 0.003 and abs(float(old_.get("tray_top", -1)) - tray_top) < 0.002:
+                        print(f"the plan made when {args.cell} was chosen still holds (closing point within "
+                              f"{abs(z_new - float(old_['close_point'][2])) * 1000:.0f} mm): used as it is")
+                        return 0
+                    print(f"planned again: the closing point moved {(z_new - float(old_['close_point'][2])) * 1000:+.0f} mm since the plant was chosen")
+            except Exception:  # noqa: BLE001  (an old plan file: plan again)
+                pass
+
         # the flattest pitch first (fingers parallel to the tray), every heading at it, then the next pitch: the first
         # fully safe plan wins. Only the chosen plan's moves are printed in full, the others as one line each
         chosen, raised, best = None, set(), None
@@ -599,6 +617,8 @@ def main() -> int:
                                                },
                                          "vias": [v.tolist() for v in q_via],
                                          **{f"{k_}_vias": [v.tolist() for v in q_down[k_]] for k_ in ("down", "approach", "lift")},
+                                         "z_close": round(float(z_close), 4), "tray_top": round(tray_top, 4),
+                                         "yaw": float(radial + np.radians(dyaw)),
                                          "safe": bool(ok)}, indent=1))
         print("plan saved" if ok else "plan saved but NOT SAFE: the motion phases will refuse it", plan_file.relative_to(PROJECT_DIR))
         return 0 if ok else 1

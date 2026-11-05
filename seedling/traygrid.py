@@ -171,13 +171,26 @@ def _match(I: np.ndarray, t0: np.ndarray, ang: float, window=None):
 
 
 def locate_tray(frame: Frame, T_BC: np.ndarray, cfg: dict, prior: dict | None = None, window_m: float = 0.02,
-                z_top: float | None = None) -> TrayGrid:
+                z_top: float | None = None, z_hint: float | None = None, fast_min_score: float = 0.66) -> TrayGrid:
     """prior: cells of an earlier fit; then only yaw within 1 deg and shifts within window_m of it are searched,
     so a close view that shows only part of the tray is located without whole-cell ambiguity (the shift
     against the prior is then the disagreement between the two views)."""
     m = cfg["tray"]["model"]
     rows, cols = int(m["rows"]), int(m["cols"])
     p, wall, rim = float(m["pitch_m"]) * 1000, float(m["wall_m"]) * 1000, float(m["rim_m"]) * 1000
+    if prior is None and z_top is None and z_hint is not None:
+        # fast path: the tray top near where it was last time (the dense depth there, within 3 cm); a clear fit there is
+        # taken, else the full search below (2026-11-04: the full height scan took ~6 s of every locate)
+        ok_ = np.isfinite(frame.xyz).all(-1)
+        zd = apply_T(T_BC, frame.xyz[ok_])[:, 2]
+        near = zd[np.abs(zd - z_hint) < 0.03]
+        if len(near) >= 2000:
+            h_, e_ = np.histogram(near, bins=np.arange(z_hint - 0.03, z_hint + 0.0301, 0.002))
+            zc = float(np.median(near[np.abs(near - (e_[int(np.argmax(h_))] + 0.001)) < 0.006]))
+            g = locate_tray(frame, T_BC, cfg, z_top=zc)
+            if g.ok and g.score >= fast_min_score:
+                g.extra = {**(g.extra or {}), "z_candidates": [round(zc, 4)], "fast_path": True}
+                return g
     if prior is None and z_top is None:
         cands = z_scan_candidates(frame, T_BC, cfg)
         if len(cands) > 1:  # fit at each; a passing fit beats a failing one, then the better match

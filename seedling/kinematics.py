@@ -70,9 +70,36 @@ def _rotvec(R: np.ndarray) -> np.ndarray:
     return 0.5 * w if sn < 1e-12 else w * (math.atan2(sn, c) / (2.0 * sn))
 
 
+_PIN = None
+
+
+def _pin():
+    """pinocchio's model of the same arm (Franka's FR3 URDF, the same DH frames: checked to 1e-15), ~20x faster than
+    the Python DH products below; None if pinocchio or the URDF is missing (then the Python version is used)"""
+    global _PIN
+    if _PIN is None:
+        try:
+            import pinocchio as pin
+
+            from .config import PROJECT_DIR
+
+            urdf = PROJECT_DIR / "data" / "third_party" / "fr3_build" / "fr3.urdf"
+            model = pin.buildModelFromUrdf(str(urdf))
+            data = model.createData()
+            _PIN = (pin, model, data, model.getFrameId("fr3_link8"), [model.getJointId(f"fr3_joint{i}") for i in range(1, 8)])
+        except Exception:  # noqa: BLE001
+            _PIN = False
+    return _PIN or None
+
+
 def fk_flange(q: np.ndarray, offsets: np.ndarray | None = None) -> np.ndarray:
     """Flange pose for reported joint angles q (plus JOINT_OFFSETS, or the given offsets)."""
     q = np.asarray(q, dtype=float) + (JOINT_OFFSETS if offsets is None else np.asarray(offsets, dtype=float))
+    P = _pin()
+    if P is not None:
+        pin, model, data, fid, _ = P
+        pin.framesForwardKinematics(model, data, q)
+        return data.oMf[fid].homogeneous.copy()
     T = np.eye(4)
     for (a, d, alpha), theta in zip(_DH, q):
         T = T @ _dh(a, d, alpha, theta)
@@ -85,6 +112,11 @@ def fk(q: np.ndarray, F_T_EE: np.ndarray = DEFAULT_F_T_EE) -> np.ndarray:
 
 def _frames(q: np.ndarray, F_T_EE: np.ndarray) -> tuple[list[np.ndarray], np.ndarray]:
     """Joint frames (after each joint rotation) and the EE pose."""
+    P = _pin()
+    if P is not None:
+        pin, model, data, fid, jids = P
+        pin.framesForwardKinematics(model, data, np.asarray(q, dtype=float) + JOINT_OFFSETS)
+        return [data.oMi[j].homogeneous for j in jids], data.oMf[fid].homogeneous @ F_T_EE
     T = np.eye(4)
     frames = []
     for (a, d, alpha), theta in zip(_DH, np.asarray(q, dtype=float) + JOINT_OFFSETS):
@@ -191,7 +223,11 @@ def solve_ik_near(
         Tk[:3, :3] = Rotation.from_rotvec(dR * k / steps).as_matrix() @ T0[:3, :3]
         Tk[:3, 3] = T0[:3, 3] + (target_T_BE[:3, 3] - T0[:3, 3]) * k / steps
         q_prev = q.copy()
-        q = least_squares(lambda x: np.concatenate([_residual(x, Tk, F_T_EE, rot_weight), pull * (x - q_prev)]), q, bounds=(lo, hi)).x
+        # residual + weak pull towards the previous joints, bounded (trust region); the analytic Jacobian instead of
+        # scipy's finite differences (7 extra residuals per step: most of the planning time, 2026-11-04)
+        eye = pull * np.eye(7)
+        q = least_squares(lambda x: np.concatenate([_residual(x, Tk, F_T_EE, rot_weight), pull * (x - q_prev)]), q, bounds=(lo, hi),
+                          jac=lambda x: np.vstack([_jacobian(x, Tk, F_T_EE, rot_weight), eye])).x
     r = _residual(q, target_T_BE, F_T_EE, rot_weight)
     if np.linalg.norm(r[:3]) <= pos_tol_m and np.degrees(np.linalg.norm(r[3:]) / rot_weight) <= rot_tol_deg:
         return q

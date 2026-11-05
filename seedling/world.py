@@ -175,6 +175,12 @@ class World:
             d = self._dist(A, (B[1], B[2], B[3])) - need
             if d < out["self"][0]:
                 out["self"] = (d, f"{a_} - {b_}")
+        # the robot refuses any target whose contact point lies outside robot.workspace_m (seedling.robot._validate):
+        # every pose of every path stays inside it (2026-11-04: a carry waypoint at y = -0.509 was refused)
+        ws = self.cfg["robot"]["workspace_m"]
+        Tg = kinematics.fk(np.asarray(q, float), self.F) @ self.G
+        m_ws = min(min(Tg[i, 3] - ws[ax][0], ws[ax][1] - Tg[i, 3]) for i, ax in enumerate("xyz"))
+        out["workspace"] = (float(m_ws), "contact point near the workspace limit")
         return out
 
     def margins(self, q, **kw) -> dict:

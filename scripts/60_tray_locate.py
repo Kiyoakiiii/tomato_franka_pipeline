@@ -54,7 +54,14 @@ def main() -> int:
         frame.meta["q"] = q.tolist()
     T_BC = kinematics.fk_flange(q) @ T_FC
     m = cfg["tray"]["model"]
-    g = locate_tray(frame, T_BC, cfg) if args.method in ("auto", "grid") else None
+    # the tray top found last time, as a hint (searched near it first; the full search if no clear fit there)
+    gf = PROJECT_DIR / cfg["tray"]["grid_file"]
+    try:
+        last = json.loads(gf.read_text())
+        z_hint = float(last["z_top"]) if last.get("ok") else None
+    except Exception:  # noqa: BLE001
+        z_hint = None
+    g = locate_tray(frame, T_BC, cfg, z_hint=z_hint) if args.method in ("auto", "grid") else None
     if g is not None:
         print("grid:", json.dumps(g.summary()))
     if g is not None and g.ok and args.method == "auto":

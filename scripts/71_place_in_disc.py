@@ -140,6 +140,17 @@ def main() -> int:
             return make_T(Rr, np.array([xy[0], xy[1], z_close]) - a * fwd)  # G = open gap centre; the stem is fwd ahead
 
         free = [int(h) for h in args.free.split(",")] if args.free else disc.get("free_holes", list(range(1, len(holes) + 1)))
+        # the plan made when this plant was chosen is used as it is when the grasp plan is still the same one (its lift
+        # pose) and the hole is still free
+        if place_file.exists() and not args.hole:
+            try:
+                old_ = json.loads(place_file.read_text())
+                if (old_.get("safe") and float(np.degrees(np.abs(np.array(old_["start"]) - q_lift)).max()) < 0.1
+                        and old_.get("hole") in free and old_.get("below_mm") == round(below * 1000, 1)):
+                    print(f"the place plan made when {args.cell} was chosen still holds (H{old_['hole']}): used as it is")
+                    return 0
+            except Exception:  # noqa: BLE001
+                pass
         if args.hole and args.hole not in free:
             print(f"refused: H{args.hole} is taken (a plug in it on the last overview); free: {free}")
             return 1
@@ -338,7 +349,8 @@ def main() -> int:
                                    f"let go with it {args.insert_mm:.0f} mm in the hole"))
         enc = {k: ([w.tolist() for w in v] if isinstance(v, list) else v.tolist()) for k, v in plan_.items()}
         place_file.write_text(json.dumps({"cell": args.cell, "hole": hi + 1, "hole_xy": holes[hi].tolist(), "q": enc,
-                                          "start": q_lift.tolist(), "release_raised_mm": round(raised * 1000, 1), "safe": True}, indent=1))
+                                          "start": q_lift.tolist(), "release_raised_mm": round(raised * 1000, 1),
+                                          "below_mm": round(below * 1000, 1), "safe": True}, indent=1))
         print("place plan saved")
         return 0
 
@@ -365,10 +377,13 @@ def main() -> int:
         return True
 
     if args.phase == "carry":
-        if not at("start"):
-            return 1
-        if not (through("up_vias", args.dynamics, "up") and move(q["up"], args.dynamics, "up")):
-            return 1
+        if float(np.degrees(np.abs(q_now - q["up"])).max()) <= 1.0:
+            print("already at the up pose")  # resumed after the carry stopped there
+        else:
+            if not at("start"):
+                return 1
+            if not (through("up_vias", args.dynamics, "up") and move(q["up"], args.dynamics, "up")):
+                return 1
         if not (through("vias", args.dynamics, "carry") and move(q["across"], args.dynamics, "carry")):
             return 1
         return 0
