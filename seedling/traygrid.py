@@ -378,11 +378,15 @@ def draw_cells(frame: Frame, T_BC: np.ndarray, cells: dict) -> np.ndarray:
 
 
 def occupied_cells(frame: Frame, T_BC: np.ndarray, cells: dict, z_top: float, cfg: dict,
-                   plug_dz: float = 0.013, min_peat: float = 0.03) -> dict:
+                   plug_dz: float = 0.013, min_peat: float = 0.10) -> dict:
     """Cells holding a plug: peat colour on a ring 9-15 mm around the cell centre at plug-top height. The plug's
     rim usually shows beside the leaves; an empty cell is black plastic there, also under a neighbour's
     overhanging leaves (2026-10-22, top view: the 12 plugs 0.06-0.76, the 60 empty cells 0.00). Dense depth
-    was tried first and is unreliable under leaves. {cell: peat fraction}."""
+    was tried first and is unreliable under leaves. {cell: peat fraction}.
+    min_peat 0.10 since 2026-11-04 (0.03 before): seen at an angle (60 deg overview) the side of a plug covers the ring
+    of the empty cell in front of it (0.03-0.08: B6-B8; the arm went for the empty B8). A plug hidden under leaves
+    can read lower and is then found once the plants in front of it are gone: missed for now is safer than an
+    empty cell taken for a plug."""
     from .stemline import substrate_mask
 
     soil = substrate_mask(frame.rgb, cfg["stemline"])
