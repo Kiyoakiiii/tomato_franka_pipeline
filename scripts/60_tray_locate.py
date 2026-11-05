@@ -60,11 +60,27 @@ def main() -> int:
     if g is not None and g.ok and args.method == "auto":
         # cross-check: the outline (+ known pitch) is good to a few mm and cannot slip by whole cells; a grid
         # fit that disagrees by more than a third of a cell has locked onto the wrong cells (2026-10-22: one column)
-        o = locate_tray_outline(frame, T_BC, int(m["rows"]), int(m["cols"]), cfg, pitch=float(m["pitch_m"]))
+        o = locate_tray_outline(frame, T_BC, int(m["rows"]), int(m["cols"]), cfg, pitch=float(m["pitch_m"]), top_z=g.z_top)
         if o["ok"]:
             d = np.array([np.linalg.norm(np.array(g.cells[k][:2]) - np.array(o["cells"][k][:2])) for k in g.cells])
             print(f"cross-check grid vs outline: median {np.median(d) * 1000:.1f} mm, max {d.max() * 1000:.1f} mm")
-            if np.median(d) > float(m["pitch_m"]) / 3:
+            pm = float(m["pitch_m"])
+            if np.median(d) > pm / 3:
+                # the grid is good to a mm but can slip by whole cells (it is periodic); the outline is good to ~1 cm and
+                # cannot: the grid moved by the whole number of cells that brings it onto the outline
+                vr = (np.array(g.cells["B1"][:2]) - np.array(g.cells["A1"][:2]))  # one row
+                vc = (np.array(g.cells["A2"][:2]) - np.array(g.cells["A1"][:2]))  # one column
+                off = np.mean([np.array(o["cells"][k][:2]) - np.array(g.cells[k][:2]) for k in g.cells], axis=0)
+                nr, nc = np.round(np.linalg.solve(np.column_stack([vr, vc]), off)).astype(int)
+                moved = {k: [round(v[0] + nr * vr[0] + nc * vc[0], 4), round(v[1] + nr * vr[1] + nc * vc[1], 4), v[2]] for k, v in g.cells.items()}
+                d2 = np.array([np.linalg.norm(np.array(moved[k][:2]) - np.array(o["cells"][k][:2])) for k in moved])
+                if (nr or nc) and np.median(d2) <= pm / 3:
+                    g.cells = moved
+                    g.status = f"ok (grid moved by {nr:+d} rows, {nc:+d} columns onto the tray outline)"
+                    print(f"CORRECTED: the grid fit was {abs(nr)} row(s), {abs(nc)} column(s) off; moved onto the outline "
+                          f"(now median {np.median(d2) * 1000:.1f} mm from it)")
+                    d = d2
+            if np.median(d) > pm / 3:
                 g.ok, g.status = False, (f"grid fit and tray outline disagree by {np.median(d) * 1000:.0f} mm (about "
                                          f"{np.median(d) / float(m['pitch_m']):.1f} cells): grid locked onto the wrong cells")
                 print("REJECTED:", g.status)

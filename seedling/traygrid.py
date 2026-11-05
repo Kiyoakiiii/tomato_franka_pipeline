@@ -390,7 +390,7 @@ def occupied_cells(frame: Frame, T_BC: np.ndarray, cells: dict, z_top: float, cf
 
 
 def locate_tray_outline(frame: Frame, T_BC: np.ndarray, rows: int, cols: int, cfg: dict, pitch: float | None = None,
-                        res: float = 0.002, min_step_m: float = 0.02) -> dict:
+                        res: float = 0.002, min_step_m: float = 0.02, top_z: float | None = None) -> dict:
     """Tray from its outline only (works when every cell holds a plant and no cell or plug is visible): the
     dense points higher than the surface the tray stands on, without plant-green ones, form the tray's
     footprint; its minimum-area rectangle gives the corners, size and yaw; the cells divide the rectangle into
@@ -410,7 +410,13 @@ def locate_tray_outline(frame: Frame, T_BC: np.ndarray, rows: int, cols: int, cf
     z = P[:, 2]
     h, e = np.histogram(z[z < np.percentile(z, 70)], bins=np.arange(z.min(), np.percentile(z, 70) + 0.004, 0.004))
     support = float(e[int(np.argmax(h))] + 0.002)
-    high = (z > support + min_step_m) & ~G
+    if top_z is not None:
+        # the tray top known (the grid fit): only the points at its top face (wall tops, rims, plugs), so a stand the
+        # tray is raised on does not count as tray (2026-11-04: the stand made the outline 550 x 324 mm, the check
+        # was skipped and a grid one row off went through)
+        high = (z > top_z - 0.012) & (z < top_z + 0.10) & ~G
+    else:
+        high = (z > support + min_step_m) & ~G
     Q = P[high]
     if len(Q) < 2000:
         return {"ok": False, "status": "no raised region above the support surface"}
@@ -440,7 +446,7 @@ def locate_tray_outline(frame: Frame, T_BC: np.ndarray, rows: int, cols: int, cf
         v = corners[0] - corners[1]
     L, Wd = np.linalg.norm(u), np.linalg.norm(v)
     # tray top: the wall-top height peak above the support (not a percentile: plugs and plants stand higher)
-    rim_z = tray_top_z(frame, T_BC, support + min_step_m, support + 0.25)
+    rim_z = top_z if top_z is not None else tray_top_z(frame, T_BC, support + min_step_m, support + 0.25)
     if rim_z is None:
         rim_z = float(np.percentile(Q[:, 2], 50))
     centres = {}
