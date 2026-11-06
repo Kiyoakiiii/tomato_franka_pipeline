@@ -100,76 +100,143 @@ def _run(args, cfg, gdir, stop, run, env_plan) -> int:
     if rc != 0 or not disc.get("ok") or disc.get("ok_last_picture") is False:
         print("the tray or the disc was not located: stopped")
         return 1
-    print(">>> the program", flush=True)
+    print(">>> the program (worked out in the background: the first plant starts as soon as its program is there)", flush=True)
     t0 = time.time()
-    rc, out = run(["scripts/76_program.py", "build", *(["--reteach"] if args.reteach else [])], quiet=True, env=env_plan)
-    print("\n".join(ln for ln in out.splitlines() if not ln.startswith((" - ", "nanobind")) and "leaked" not in ln and "Random" not in ln))
-    if rc != 0:
-        print("no program for this layout: stopped")
-        return 1
-    print(f"(program ready in {time.time() - t0:.1f} s)")
-    prog = json.loads((gdir / "program.json").read_text())
-    hole_order = list(prog["hole_order"])
+    pf = gdir / "program.json"
+    t_launch = time.time()
+    blog = open(PROJECT_DIR / ".tmp" / "program_build.log", "w")
+    build = subprocess.Popen([sys.executable, "-u", "scripts/76_program.py", "build", *(["--reteach"] if args.reteach else [])],
+                             cwd=PROJECT_DIR, env=env_plan, stdout=blog, stderr=subprocess.STDOUT, text=True)
 
-    done, placed, failed = 0, [], set()
-    skip = set(filter(None, args.skip.split(",")))
-    end_check = False
-    while True:
-        if stop.exists():
-            print("STOPPED on request")
-            break
-        if done >= args.max_plants:
-            print(f"{done} plants done (--max-plants)")
-            end_check = True
-            break
-        grid, disc = json.loads(gf.read_text()), json.loads(df.read_text())
-        free = [h for h in hole_order if h in disc.get("free_holes", [])]
-        todo = [k for k in plant_order(grid, grid.get("occupied", [])) if k not in skip and k not in failed]
-        if not free:
-            print("DISC FULL (the holes the program reaches)")
-            end_check = True
-            break
-        # the next plant in the user's order, into the first free hole (in the program's order) the program takes it to
-        t1 = time.time()
-        chosen = None
+    def program():
+        """the program as written by the build of this run (None before its first write)"""
+        try:
+            if pf.stat().st_mtime < t_launch:
+                return None
+            return json.loads(pf.read_text())
+        except (OSError, ValueError):
+            return None
+
+    def wait_for(k):
+        """until the build has decided about plant k (k None: until the taught configurations are there), or finished"""
+        while True:
+            pr = program()
+            if pr is not None and ((k is None and pr.get("configs")) or k in pr.get("cells", {}) or k in pr.get("no_way", {})
+                                   or not pr.get("building", True)):
+                return pr
+            if build.poll() is not None:
+                return program()
+            time.sleep(0.3)
+
+    def build_lines():
+        txt = (PROJECT_DIR / ".tmp" / "program_build.log").read_text(errors="replace")
+        return [ln for ln in txt.splitlines() if not ln.startswith((" - ", "nanobind")) and "leaked" not in ln and "Random" not in ln
+                and "closing point raised" not in ln]
+
+    def choose(todo, free, ignore=(), extra_taken=()):
+        """the next plant in the user's order into the first free hole the program takes it to: (cell, hole) or None"""
+        ig = ["--ignore-cells", ",".join(ignore)] if ignore else []
         for k in todo:
-            if k not in prog.get("cells", {}):
-                continue  # the program has no way for it (76 build said why)
-            rg, og = run(["scripts/76_program.py", "grasp", "--cell", k, "--from-observe"], quiet=True, env=env_plan)
+            pr = wait_for(k)
+            if pr is None or k not in pr.get("cells", {}):
+                continue
+            rg, _o = run(["scripts/76_program.py", "grasp", "--cell", k, "--from-observe", *ig], quiet=True, env=env_plan)
             if rg != 0:
                 continue
             for hole in free:
-                rp, op = run(["scripts/76_program.py", "place", "--cell", k, "--hole", str(hole)], quiet=True, env=env_plan)
+                if hole in extra_taken:
+                    continue
+                rp, _o = run(["scripts/76_program.py", "place", "--cell", k, "--hole", str(hole), *ig,
+                              *(["--taken", ",".join(map(str, extra_taken))] if extra_taken else [])], quiet=True, env=env_plan)
                 if rp == 0:
-                    chosen = (k, hole)
-                    break
-            if chosen:
+                    return (k, hole)
+        return None
+
+    hole_order = None
+    done, placed, failed = 0, [], set()
+    skip = set(filter(None, args.skip.split(",")))
+    end_check = False
+    ahead = None  # the next plant chosen in the background while the arm moves the current one
+    try:
+        while True:
+            if stop.exists():
+                print("STOPPED on request")
                 break
-        if chosen is None:
-            print(f"no plant left the program takes into a free hole (plants {todo}, holes {free}): stopped")
-            end_check = True
-            break
-        k, hole = chosen
-        print(f">>> transplant {k} -> H{hole} (the template planned in {time.time() - t1:.1f} s)", flush=True)
-        rc, _ = run(["scripts/69_pick_cycle.py", "--cell", k, "--lift-mm", "100", "--place", str(hole), "--no-return", "--program"])
-        if rc == 3:
-            print(f"the cycle for {k} found no safe plan after the close-up (nothing touched): {k} left, on with the next")
-            failed.add(k)
-            continue
-        if rc != 0:
-            print(f"the cycle for {k} stopped (exit {rc}): stopped here, the arm is where that step left it")
-            break
-        done += 1
-        placed.append((k, hole))
-        g_ = json.loads(gf.read_text())
-        for key_ in ("occupied", "planted"):
-            if key_ in g_:
-                g_[key_] = [x for x in g_[key_] if x != k]
-        write_json(gf, g_)
-        d_ = json.loads(df.read_text())
-        d_["free_holes"] = [h for h in d_.get("free_holes", []) if h != hole]
-        write_json(df, d_)
-        print(f"{k} -> H{hole} done ({done}); straight on", flush=True)
+            if done >= args.max_plants:
+                print(f"{done} plants done (--max-plants)")
+                end_check = True
+                break
+            grid, disc = json.loads(gf.read_text()), json.loads(df.read_text())
+            if hole_order is None:
+                pr = wait_for(None)
+                if pr is None or not pr.get("configs"):
+                    build.wait()
+                    print("\n".join(build_lines()[-6:]))
+                    print("no program for this layout: stopped")
+                    return 1
+                hole_order = list(pr["hole_order"])
+                print(f"(the program's arm configuration ready in {time.time() - t0:.1f} s)")
+            free = [h for h in hole_order if h in disc.get("free_holes", [])]
+            todo = [k for k in plant_order(grid, grid.get("occupied", [])) if k not in skip and k not in failed]
+            if not free:
+                print("DISC FULL")
+                end_check = True
+                break
+            t1 = time.time()
+            if ahead is not None:
+                ahead["thread"].join()
+                chosen = ahead["chosen"] if (ahead["free"] == free and ahead["todo"] == todo) else None
+                ahead = None
+            else:
+                chosen = None
+            if chosen is None:
+                chosen = choose(todo, free)
+            if chosen is None:
+                print(f"no plant left the program takes into a free hole (plants {todo}, holes {free}): stopped")
+                end_check = True
+                break
+            k, hole = chosen
+            print(f">>> transplant {k} -> H{hole} (ready in {time.time() - t1:.1f} s)", flush=True)
+            # the next one meanwhile, for the state after this one (its cell empty, its hole taken)
+            if done + 1 < args.max_plants:
+                import threading
+
+                todo_n, free_n = [x for x in todo if x != k], [h for h in free if h != hole]
+                ahead = {"todo": todo_n, "free": free_n, "chosen": None}
+
+                def plan_ahead(a=ahead, todo_n=todo_n, free_n=free_n, k=k, hole=hole):
+                    a["chosen"] = choose(todo_n, free_n, ignore=[k], extra_taken=[hole])
+
+                ahead["thread"] = threading.Thread(target=plan_ahead, daemon=True)
+                ahead["thread"].start()
+            rc, _ = run(["scripts/69_pick_cycle.py", "--cell", k, "--lift-mm", "100", "--place", str(hole), "--no-return", "--program"])
+            if rc == 3:
+                print(f"the cycle for {k} found no safe plan after the close-up (nothing touched): {k} left, on with the next")
+                failed.add(k)
+                if ahead is not None:
+                    ahead["thread"].join()
+                    ahead = None
+                continue
+            if rc != 0:
+                print(f"the cycle for {k} stopped (exit {rc}): stopped here, the arm is where that step left it")
+                break
+            done += 1
+            placed.append((k, hole))
+            g_ = json.loads(gf.read_text())
+            for key_ in ("occupied", "planted"):
+                if key_ in g_:
+                    g_[key_] = [x for x in g_[key_] if x != k]
+            write_json(gf, g_)
+            d_ = json.loads(df.read_text())
+            d_["free_holes"] = [h for h in d_.get("free_holes", []) if h != hole]
+            write_json(df, d_)
+            print(f"{k} -> H{hole} done ({done}); straight on", flush=True)
+    finally:
+        if ahead is not None:
+            ahead["thread"].join()
+        if build.poll() is None:
+            build.wait()
+        print("the program:\n" + "\n".join(build_lines()))
     if end_check and placed and not stop.exists():
         print(">>> back to the overview, one picture to check", flush=True)
         if run(["scripts/68_goto_overview.py", "--after-place", placed[-1][0]])[0] == 0:

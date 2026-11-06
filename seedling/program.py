@@ -167,7 +167,7 @@ class Program:
         return None, None
 
     # ---- teaching ----------------------------------------------------------------------------------------------------
-    def teach(self, plants: list[str], world, world_disc, log=print, max_refs: int = 3, per_ref: int = 4) -> bool:
+    def teach(self, plants: list[str], world, world_disc, log=print, max_refs: int = 3, per_ref: int = 4, holes=None) -> bool:
         """the job's arm configuration(s) and, per configuration, the hand heading of each hole it lets go into.
         Candidates: every clear joint solution of the grasp of a few plants near the middle (the most natural first);
         each is a configuration the hand reaches other cells in by straight moves. Chosen: the one reaching the most
@@ -199,8 +199,12 @@ class Program:
                     continue
                 self.configs[0] = {"q_ref": q}
                 reach = [k for k in plants if (lambda qg: qg is not None and world.ok(qg, fingers=False, plants=False))(self.grasp_joints(poses[k]["grasp"])[0])]
-                headings = self._teach_holes(tpl["lift"], below, world_disc)
+                headings = self._teach_holes(tpl["lift"], below, world_disc, holes)
                 found.append({"q_ref": q, "ref_T": P["grasp"], "ref": ref, "posture": pc, "cells": reach, "hole_heading": headings})
+                if len(headings) == len(holes if holes is not None else self.hole_order):
+                    break  # every hole from this one (the most natural so far that does): no need to look further
+            if found and len(found[-1]["hole_heading"]) == len(holes if holes is not None else self.hole_order):
+                break
         chosen, used, covered = [], set(), set()
         while True:
             rest = [i for i, f_ in enumerate(found) if i not in used and f_["cells"] and set(f_["hole_heading"]) - covered]
@@ -220,7 +224,7 @@ class Program:
         log(f"approach heading {np.degrees(self.yaw):+.0f} deg (absolute) for every cell")
         return True
 
-    def _teach_holes(self, q_lift, below, world_disc) -> dict:
+    def _teach_holes(self, q_lift, below, world_disc, holes=None) -> dict:
         """per hole (in the filling order, the earlier ones filled), the first heading from which a flat hand carried
         from this lift pose lets go into it: joint continuity of the whole way and the release clear (no waypoints
         worked out: the plans do that)"""
@@ -233,6 +237,8 @@ class Program:
         q_up = pcs[-1][1][-1]
         out, filled = {}, []
         for h in self.hole_order:
+            if holes is not None and h not in holes:
+                continue  # taken already (the world has its plant)
             w = world_disc(filled)
             for dy in HEADINGS:
                 ok = False

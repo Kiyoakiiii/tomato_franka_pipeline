@@ -24,6 +24,15 @@ OUT = PROJECT_DIR / "experiments" / "grasp"
 PROG = OUT / "program.json"
 
 
+def save_program(d: dict):
+    """written whole or not at all: the run (77) reads it while the build goes on"""
+    import os
+
+    tmp = PROG.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, indent=1))
+    os.replace(tmp, PROG)
+
+
 def main() -> int:
     ap = base_parser(__doc__)
     ap.add_argument("action", choices=["build", "grasp", "place"])
@@ -35,6 +44,7 @@ def main() -> int:
     ap.add_argument("--approach-deg", type=float, default=15.0, help="build: the approach direction for every cell, turned "
                     "this far towards the robot's right from straight out at the tray's centre (plants taken right to left)")
     ap.add_argument("--finger-clearance-mm", type=float, default=3.0)
+    ap.add_argument("--taken", default="", help="place: comma list of holes to take as filled too (planning the next plant ahead)")
     ap.add_argument("--grid", default=None, help="build: the tray file to use (testing; default the current one)")
     ap.add_argument("--free", default=None, help="build: comma list of the free holes to assume (testing)")
     ap.add_argument("--only", default="", help="build: work out the program only for these cells (comma list; testing)")
@@ -103,11 +113,19 @@ def main() -> int:
             print(f"the tray and the disc are where they were: the program taught then is used ({len(prog.configs)} configuration(s))")
             ok = True
         else:
-            ok = prog.teach(plants, world_disc(), lambda filled: world_disc(filled, stems=True))
-            if PROG_SAVE:
-                PROG.write_text(json.dumps({**prog.to_dict(), "approach_deg": args.approach_deg}, indent=1))
+            ok = prog.teach(plants, world_disc(), lambda filled: world_disc(filled, stems=True), holes=free)
+            prog.cell_prog = {}
         if not ok:
+            if PROG_SAVE:
+                save_program({**prog.to_dict(), "approach_deg": args.approach_deg, "building": False})
             return 1
+        no_way = {}
+
+        def save(building=True):
+            # after every plant: the run starts with the first plant while the others are worked out
+            if PROG_SAVE:
+                save_program({**prog.to_dict(), "approach_deg": args.approach_deg, "no_way": no_way, "building": building})
+
         # the whole job once, in its order (each plant's cell gone after it, each hole taken after it): which plants and
         # holes the program reaches
         # the holes in the program's order, those the taught configurations let go into first (a plant's own variant
@@ -122,6 +140,7 @@ def main() -> int:
         # kept from the last build (the same layout): each cell's program, and the cells found impossible with the same
         # holes left (worked out again when the holes differ, e.g. an emptied disc)
         no_way = (old or {}).get("no_way", {}) if prog.cell_prog else {}
+        save()
         if True:
             done, left_holes = [], list(holes)
             for k in plants:
@@ -140,7 +159,7 @@ def main() -> int:
                                 h_ok = h
                                 break
                     if h_ok is not None:
-                        print(f"  {k} -> H{h_ok}: {prog.cell_prog[k].get('note', '')} (as before)")
+                        print(f"  {k} -> H{h_ok}: {prog.cell_prog[k].get('note', '')} (as before)", flush=True)
                         done.append(k)
                         left_holes.remove(h_ok)
                         continue
@@ -203,6 +222,7 @@ def main() -> int:
                             break
                 if not found:
                     no_way[k] = list(left_holes)
+                    save()
                     print(f"  {k}: no way found ({'; '.join(why_k[-3:])})")
                     if grasped[0]:
                         print(f"  the free holes left ({', '.join(f'H{h}' for h in left_holes)}) are not reached by a flat hand from "
@@ -212,11 +232,11 @@ def main() -> int:
                 h, r, note = found
                 prog.cell_prog[k] = {"yaw": float(r["yaw"]), "q": np.array(r["q"]["grasp"]), "note": note,
                                      "cap": 0.050 if "50 mm" in note else 0.035}
-                print(f"  {k} -> H{h}: {note}")
+                print(f"  {k} -> H{h}: {note}", flush=True)
                 done.append(k)
                 left_holes.remove(h)
-            if PROG_SAVE:
-                PROG.write_text(json.dumps({**prog.to_dict(), "approach_deg": args.approach_deg, "no_way": no_way}, indent=1))
+                save()
+            save(building=False)
         print(f"program built in {time.time() - t0:.1f} s")
         return 0
 
@@ -262,7 +282,8 @@ def main() -> int:
         print(f"refused: H{args.hole} is taken; free: {free}")
         return 1
     left = [k for k in planted if k != args.cell]
-    pl = place_plan(prog, args.cell, args.hole, gp, left, world_disc, check_pieces, write=True)
+    pl = place_plan(prog, args.cell, args.hole, gp, left, world_disc, check_pieces, write=True,
+                    extra_taken=[int(h) for h in args.taken.split(",") if h])
     if isinstance(pl, str):
         print(f"{args.cell}: not into H{args.hole} ({pl})")
         return 1
