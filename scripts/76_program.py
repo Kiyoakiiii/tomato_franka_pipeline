@@ -388,6 +388,7 @@ def grasp_plan(prog, cell, cfg, grid, disc, q_start, planted, world_disc, check_
                obs_from=None, finger_floor=None, ci=0, variant=None, stems=None):
     """the template at this cell: the plan dict (65's format), or why not (str)"""
     from seedling.program import RIM
+    from seedling import cartesian
     from seedling.planner import plan_path
 
     yaw = float(variant["yaw"]) if variant is not None else prog.yaw
@@ -418,7 +419,7 @@ def grasp_plan(prog, cell, cfg, grid, disc, q_start, planted, world_disc, check_
         worst = min(cl.values(), key=lambda v: v[0])
         if worst[0] >= 0:
             break
-        if not worst[1].endswith(("- tray", "- table")) or z_close - worst[0] + 0.003 > z_cap + 1e-6:
+        if not worst[1].endswith(("- tray", "- table", "- disc")) or z_close - worst[0] + 0.003 > z_cap + 1e-6:
             return f"the grasp itself: {worst[1]} {worst[0] * 1000:+.0f} mm"
         print(f"closing point raised {(-worst[0] + 0.003) * 1000:.0f} mm ({worst[1]} {worst[0] * 1000:+.0f} mm)")
         z_close -= worst[0] - 0.003
@@ -433,26 +434,59 @@ def grasp_plan(prog, cell, cfg, grid, disc, q_start, planted, world_disc, check_
             return f"{name}: {bad}"
     vias = []
     if q_start is not None:
-        # the turn from where the arm is (the observation pose) to the stage: one joint move if it is clear of
-        # everything (the plants too), else through the pose straight above the stage, else a path
+        # the turn from where the arm is (the observation pose) to the stage, as a robot program does it: straight up
+        # from where it is (0-15 cm), one joint move high up to straight above the stage (0-30 cm), straight down to
+        # the stage; the least lifting, then the least joint motion. A path search only when none of these is clear,
+        # kept near the natural posture (2026-11-05: the search's via pose swung the hand to y = +0.35 m, z = 0.19 m)
         scene = world_disc(plants=sorted(set(planted) | {cell}))
         q_st = tpl["stage"]
-        if scene.worst(q_start, q_st)[0] < 0:
-            T_hi = P["stage"].copy()
-            T_hi[2, 3] += 0.10
-            up, _w = prog.chain(q_st, [("above the stage", T_hi)])
-            ok_hi = False
-            if up is not None:
-                q_hi = up[0][1][-1]
-                dn, _w = prog.chain(q_hi, [("down to the stage", P["stage"])])
-                if dn is not None and scene.worst(q_start, q_hi)[0] >= 0 and not check_pieces(scene, q_hi, dn[0][2]):
-                    vias = [q_hi] + list(dn[0][2][:-1])
-                    ok_hi = True
-            if not ok_hi:
-                path = plan_path(q_start, q_st, scene.ok, time_s=3.0)
-                if path is None:
-                    return "no safe turn from the observation pose to the stage"
-                vias = list(path[:-1])
+        T_obs = prog.G_of(q_start)
+        best = None
+        # (from the observation pose the hand is ~5 cm over the plant: turning the wrist there sweeps the fingers through
+        # it, so lifting first is the usual way)
+        for up_d in (0.0, 0.05, 0.10, 0.15, 0.20, 0.25):
+            if up_d == 0.0:
+                lift_w, q_a = [], np.asarray(q_start, float)
+            else:
+                T_u = T_obs.copy()
+                T_u[2, 3] += up_d
+                lp, _w = prog.chain(q_start, [("up", T_u)])
+                if lp is None or check_pieces(scene, q_start, lp[0][2]):
+                    continue
+                lift_w, q_a = list(lp[0][2]), lp[0][1][-1]
+            for hi in (0.0, 0.10, 0.20, 0.30):
+                if hi == 0.0:
+                    q_hi, down_w = q_st, []
+                else:
+                    T_hi = P["stage"].copy()
+                    T_hi[2, 3] += hi
+                    upc, _w = prog.chain(q_st, [("above the stage", T_hi)])
+                    if upc is None:
+                        continue
+                    q_hi = upc[0][1][-1]
+                    dn, _w = prog.chain(q_hi, [("down to the stage", P["stage"])])
+                    if dn is None or check_pieces(scene, q_hi, dn[0][2]):
+                        continue
+                    down_w = list(dn[0][2])
+                if scene.worst(q_a, q_hi)[0] < 0:
+                    continue
+                cost = (up_d + hi, float(np.abs(q_hi - q_a).max()))
+                if best is None or cost < best[0]:
+                    best = (cost, lift_w + [q_hi] + down_w[:-1] if hi else lift_w)
+            if best is not None:
+                break  # the least lifting that works
+        if best is not None:
+            vias = best[1]
+        else:
+            band = cartesian.posture_cost(q_st, P["close"][:2]) + 40.0
+
+            def sensible(q_):
+                return cartesian.posture_cost(q_, P["close"][:2]) <= band and scene.ok(q_)
+
+            path = plan_path(q_start, q_st, sensible, time_s=3.0)
+            if path is None:
+                return "no safe turn from the observation pose to the stage"
+            vias = list(path[:-1])
     yaw_rel = float(np.degrees((yaw - np.arctan2(c[1], c[0]) + np.pi) % (2 * np.pi) - np.pi))
     plan = {"cell": cell, "close_point": P["close"].tolist(), "offset_mm": [0.0, 0.0], "R": P["R"].tolist(),
             "q": {"start": (q_start if q_start is not None else tpl["stage"]).tolist(), "stage": tpl["stage"].tolist(),
