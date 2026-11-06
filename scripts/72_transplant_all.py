@@ -124,16 +124,20 @@ def main() -> int:
         import os
 
         sock = PROJECT_DIR / ".tmp" / "camera.sock"
+        # its output (the ZED SDK's log lines too) into a file: a pipe nobody read after the ready line filled up and
+        # the server stopped answering (2026-11-05: the second picture of a run timed out)
+        cam_log_path = PROJECT_DIR / ".tmp" / "camera_server.log"
+        cam_log = open(cam_log_path, "w")
         cam_srv = subprocess.Popen([py, "-u", "scripts/63_camera_server.py", "--sock", str(sock)], cwd=PROJECT_DIR,
-                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                                   stdout=cam_log, stderr=subprocess.STDOUT, text=True)
         t_end = time.time() + 30
         while time.time() < t_end and cam_srv.poll() is None:
-            ln = cam_srv.stdout.readline()
-            if "camera server ready" in ln:
+            if "camera server ready" in cam_log_path.read_text(errors="replace"):
                 os.environ["SEEDLING_CAMERA_SOCK"] = str(sock)
                 break
+            time.sleep(0.2)
         else:
-            print("camera server did not start: the scripts open the camera themselves")
+            print(f"camera server did not start (see {cam_log_path.relative_to(PROJECT_DIR)}): the scripts open the camera themselves")
     try:
         return _run(args, cfg, py, grasp_dir, stop, log_file, log, run, go_on, load, plants)
     finally:
