@@ -462,6 +462,17 @@ def main() -> int:
             return float(np.percentile(need, 98))
 
         accept_first, d0_ = [False], [0.0]
+        # grasp poses from which the plant could not be placed (69 writes them when the placement plan fails, and plans
+        # again): their joint solutions are not used again in this cycle (the hand is kept flat while carrying, so the
+        # arm cannot change its joint configuration on the way: the grasp's decides; 2026-11-05 C8)
+        npf = out / f"{args.cell}_no_place.json"
+        avoid = [np.array(v) for v in json.loads(npf.read_text())] if npf.exists() else []
+
+        def no_place(q_):
+            return any(float(np.degrees(np.abs(q_ - v)).max()) < 10.0 for v in avoid)
+
+        if avoid:
+            print(f"{len(avoid)} grasp pose(s) from which the plant could not be placed: not used again")
         # the plan made when this plant was chosen (72: from the predicted observation pose) is used as it is when the
         # arm is at that pose now and its closing point still comes out the same (within 3 mm, with the close-up's
         # soil and the neighbours' soil under the finger tracks) (2026-11-04: planning twice per plant cost ~15 s)
@@ -470,7 +481,7 @@ def main() -> int:
                 old_ = json.loads(plan_file.read_text())
                 same_start = float(np.degrees(np.abs(np.array(old_["q"]["start"]) - q_now)).max()) < 1.0
                 same_cell = "cell_xy" in old_ and float(np.hypot(*(np.array(old_["cell_xy"]) - c[:2]))) < 0.002
-                if old_.get("safe") and same_start and same_cell and "yaw" in old_:
+                if old_.get("safe") and same_start and same_cell and "yaw" in old_ and not no_place(np.array(old_["q"]["grasp"])):
                     z_ff_ = finger_floor(float(old_["yaw"]))
                     z_new = max(z_close, z_ff_) if z_ff_ is not None else z_close
                     if abs(z_new - float(old_["close_point"][2])) < 0.003 and abs(float(old_.get("tray_top", -1)) - tray_top) < 0.002:
@@ -574,6 +585,9 @@ def main() -> int:
                 for pc0, q_gr in cands:
                     if n_tried >= args.max_branches or (best is not None and pc0 >= best[0]) or _tt.time() > deadline:
                         break
+                    if no_place(q_gr):
+                        print(f"  {tag}, posture {pc0:.0f} deg: the plant could not be placed from this one before")
+                        continue
                     n_tried += 1
                     lines = [f"  {tag}, posture {pc0:.0f} deg:"]
                     # the way in, as straight lines worked out backwards from the grasp: back to the pre-grasp
@@ -670,7 +684,10 @@ def main() -> int:
                     lines.append(f"  turn      : {'straight up ' + format(turn[3] * 100, '.0f') + ' cm, ' if turn[3] else ''}one joint move of at most "
                                  f"{np.degrees(np.abs(turn[6] - turn[5])).max():.0f} deg{' to ' + format(turn[4] * 100, '.0f') + ' cm above the stage, straight down' if turn[4] else ''} "
                                  f"to the stage; smallest margin {turn[1] * 1000:+.0f} mm ({turn[2]})")
-                    cost = pc + 0.05 * float(np.degrees(np.abs(q_st - q_now)).max())
+                    # the posture, the turn there, and the heading's own cost (off straight, too close to other plants):
+                    # with only the posture, C8 went in from the side of its neighbour (-20 deg, posture 35) instead of
+                    # from the empty side (+15, posture 36) (2026-11-05)
+                    cost = pc + 0.05 * float(np.degrees(np.abs(q_st - q_now)).max()) + cost_[dyaw]
                     if best is None or cost < best[0]:
                         best = (cost, (pitch, dyaw, a, across, R, close_pt, q_st, q_pre, q_gr2, q_li, turn[0],
                                        {k_: [q_ for nm_, q_ in segs if nm_ == k_][:-1] for k_ in ("down", "approach", "lift")}, True, lines), pc)

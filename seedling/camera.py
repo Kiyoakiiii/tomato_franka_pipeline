@@ -143,7 +143,19 @@ class RemoteCamera:
     def __init__(self, sock: str, cfg: dict):
         self.sock, self.cfg = sock, cfg
 
-    def grab(self, n_average: int = 1, timeout_s: float = 15.0, with_right: bool = True) -> Frame:
+    def grab(self, n_average: int = 1, timeout_s: float = 15.0, with_right: bool = True, attempts: int = 3) -> Frame:
+        """a frame from the server; asked again when it does not answer in time (2026-11-05: the ZED dropped off USB
+        twice and recovered by itself within seconds, the request in between timed out)"""
+        for i in range(attempts):
+            try:
+                return self._grab(n_average, timeout_s, with_right)
+            except (TimeoutError, ConnectionError, OSError) as exc:
+                if i == attempts - 1:
+                    raise
+                print(f"camera server did not answer ({exc!r}): asking again", flush=True)
+                time.sleep(2.0)
+
+    def _grab(self, n_average: int, timeout_s: float, with_right: bool) -> Frame:
         import io
         import socket
         import struct

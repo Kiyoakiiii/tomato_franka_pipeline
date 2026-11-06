@@ -68,7 +68,10 @@ def main() -> int:
                     data = buf.getvalue()
                 except Exception as exc:  # noqa: BLE001  (tell the client, keep serving)
                     data = b"ERR" + str(exc).encode()
-                conn.sendall(struct.pack("<Q", len(data)) + data)
+                try:
+                    conn.sendall(struct.pack("<Q", len(data)) + data)
+                except OSError as exc:  # the client gave up waiting (e.g. while the ZED recovered from a USB drop): keep serving
+                    print(f"client gone before the frame was sent ({exc})", flush=True)
     finally:
         cam.close()
         if os.path.exists(path):

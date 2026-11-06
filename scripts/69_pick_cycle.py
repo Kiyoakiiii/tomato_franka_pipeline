@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import _common  # noqa: F401  (first: caps math threads, sets project paths)
 
+import json
 import subprocess
 import sys
 import time
@@ -34,6 +35,7 @@ def main() -> int:
     ap.add_argument("--pitch-deg", type=float, nargs="+", default=None, help="grasp pitches to try (65 plan; default from the config)")
     ap.add_argument("--no-return", action="store_true", help="after placing, stay above the disc (72 goes straight on to the next "
                     "plant's observation pose; the tray and disc are located once per run)")
+    ap.add_argument("--max-replans", type=int, default=2, help="grasp planned again (another pose) this often when no placement is found from it")
     ap.add_argument("--hold-s", type=float, default=0.5, help="pause at the top of the lift (2 s until 2026-11-02)")
     ap.add_argument("--place", type=int, nargs="?", const=0, default=None, metavar="HOLE",
                     help="transplant: put the plant into this disc hole (1..6; no number: the planner's choice)")
@@ -67,12 +69,28 @@ def main() -> int:
                   ("open", ["scripts/66_gripper.py", "open"]),
                   ("retreat", ["scripts/65_side_grasp.py", "retreat", *c]),
                   ("back to the overview", ["scripts/68_goto_overview.py"])]
+    gdir = PROJECT_DIR / "experiments" / "grasp"
+    npf = gdir / f"{args.cell}_no_place.json"
+    if npf.exists():
+        npf.unlink()  # from an earlier cycle
+    replans = 0
     for i, (name, cmd) in enumerate(steps, 1):
         if stop.exists():
             print(f"STOPPED before step {i} ({name}) on request")
             return 2
         print(f">>> step {i}/{len(steps)}: {name}", flush=True)
         r = subprocess.run([py, "-u", *cmd], cwd=PROJECT_DIR)
+        while r.returncode != 0 and name == "plan the placement" and replans < args.max_replans:
+            # no placement from this grasp pose (the hand stays flat while carrying: the grasp's joint configuration
+            # decides): another grasp pose (65 leaves out the ones in {cell}_no_place.json), then the placement again
+            replans += 1
+            avoid = json.loads(npf.read_text()) if npf.exists() else []
+            avoid.append(json.loads((gdir / f"{args.cell}_side_plan.json").read_text())["q"]["grasp"])
+            npf.write_text(json.dumps(avoid))
+            print(f">>> no placement from this grasp: the grasp planned again without it ({replans}/{args.max_replans})", flush=True)
+            if subprocess.run([py, "-u", *steps[1][1]], cwd=PROJECT_DIR).returncode != 0:
+                break
+            r = subprocess.run([py, "-u", *cmd], cwd=PROJECT_DIR)
         if r.returncode != 0:
             print(f"step {i} ({name}) failed or refused (exit {r.returncode}): cycle stopped", flush=True)
             # exit 3: no plan, the plant not touched (the arm at most at the observation pose): 72 goes on with another
