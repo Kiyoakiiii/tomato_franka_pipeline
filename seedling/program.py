@@ -36,7 +36,7 @@ TRANSIT = 0.150       # plug bottom above the tray top while carrying
 PLACED_PLANT = 0.150  # plants in the disc: this tall
 BACK = 0.060          # retreat along the approach after letting go
 UP_AFTER = 0.100      # then up
-MAX_TILT = 5.0        # deg, the hand from flat while the plant is held
+MAX_TILT = 10.0       # deg, the hand from flat while the plant is held (user, 2026-11-05: 10 is fine; 5 until then)
 # hand headings at a hole, from straight out (0) all the way round: letting go only needs the hand flat, and the nearest
 # holes are reached more easily with the hand coming from beyond the disc (180) than from the robot's side
 HEADINGS = [0.0] + [s_ * d_ for d_ in range(10, 180, 10) for s_ in (-1, 1)] + [180.0]

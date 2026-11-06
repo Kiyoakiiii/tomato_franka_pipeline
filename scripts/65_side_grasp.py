@@ -518,7 +518,7 @@ def main() -> int:
             z_hi = max(float(T_li[2, 3]), tray_top + 0.15 + 0.075)
             T_hi = T_li.copy()
             T_hi[2, 3] = z_hi
-            pcs_, _w = cartesian.chain(q_li, [("up", T_hi)], F, G, margin, max_dev_m=0.03, max_tilt=5.0)
+            pcs_, _w = cartesian.chain(q_li, [("up", T_hi)], F, G, margin, max_dev_m=0.03, max_tilt=10.0)
             if pcs_ is None:
                 return False
             q_u = pcs_[-1][1][-1]

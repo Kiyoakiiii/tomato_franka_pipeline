@@ -193,6 +193,7 @@ def _run(args, cfg, gdir, stop, run, env_plan) -> int:
                 chosen = choose(todo, free)
             if chosen is None:
                 print(f"no plant left the program takes into a free hole (plants {todo}, holes {free}): stopped")
+                print("  (scripts/78_layout_check.py tells how far to move the disc or the tray so that more of them work)")
                 end_check = True
                 break
             k, hole = chosen

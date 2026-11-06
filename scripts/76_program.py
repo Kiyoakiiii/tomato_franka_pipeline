@@ -46,6 +46,8 @@ def main() -> int:
     ap.add_argument("--finger-clearance-mm", type=float, default=3.0)
     ap.add_argument("--other-holes", action="store_true", help="place: if the hole given does not work, the other free holes")
     ap.add_argument("--taken", default="", help="place: comma list of holes to take as filled too (planning the next plant ahead)")
+    ap.add_argument("--shift-disc", default=None, help="build: dx,dy,dz (m) the disc moved by (testing; not saved)")
+    ap.add_argument("--shift-tray", default=None, help="build: dx,dy,dz (m) the tray moved by (testing; not saved)")
     ap.add_argument("--grid", default=None, help="build: the tray file to use (testing; default the current one)")
     ap.add_argument("--free", default=None, help="build: comma list of the free holes to assume (testing)")
     ap.add_argument("--only", default="", help="build: work out the program only for these cells (comma list; testing)")
@@ -63,6 +65,18 @@ def main() -> int:
     disc = json.loads((PROJECT_DIR / "calibration" / "disc.json").read_text())
     if args.free is not None:
         disc["free_holes"] = [int(h) for h in args.free.split(",") if h]
+        disc["occupied_holes"] = [h for h in range(1, len(disc["holes"]) + 1) if h not in disc["free_holes"]]
+    # a layout moved by these offsets (testing where the tray / disc work best; 78)
+    if args.shift_disc:
+        dx, dy, dz = map(float, args.shift_disc.split(","))
+        disc["centre"] = [disc["centre"][0] + dx, disc["centre"][1] + dy]
+        disc["holes"] = [[h[0] + dx, h[1] + dy] for h in disc["holes"]]
+        disc["z_top"] = float(disc["z_top"]) + dz
+    if args.shift_tray:
+        dx, dy, dz = map(float, args.shift_tray.split(","))
+        grid["cells"] = {k: [v[0] + dx, v[1] + dy, v[2] + dz] for k, v in grid["cells"].items()}
+        grid["z_top"] = float(grid["z_top"]) + dz
+        grid["soil_z_overview"] = {k: v + dz for k, v in (grid.get("soil_z_overview") or {}).items()}
     gone = set(filter(None, args.ignore_cells.split(",")))
     planted = [k for k in (grid.get("planted") or grid.get("occupied", [])) if k not in gone]
     occupied = [k for k in grid.get("occupied", []) if k not in gone]
@@ -98,7 +112,7 @@ def main() -> int:
         from seedling.order import plant_order
 
         plants = plant_order(grid, occupied)
-        if args.grid or args.free is not None:
+        if args.grid or args.free is not None or args.shift_disc or args.shift_tray:
             PROG_SAVE = False
         else:
             PROG_SAVE = True

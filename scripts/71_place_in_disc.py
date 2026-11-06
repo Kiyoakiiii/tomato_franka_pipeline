@@ -61,7 +61,7 @@ def main() -> int:
     ap.add_argument("--self-clearance-mm", type=float, default=90.0, help="hand from the arm's own upper arm and forearm (see 65)")
     ap.add_argument("--path-time-s", type=float, default=12.0, help="random-tree path search time for the carry across (all holes "
                     "and headings together; each search at most a quarter of it), when no straight or one-via path is safe")
-    ap.add_argument("--max-tilt-deg", type=float, default=5.0, help="while the plant is held, the hand at most this far from flat "
+    ap.add_argument("--max-tilt-deg", type=float, default=10.0, help="while the plant is held, the hand at most this far from flat "
                     "(fingers level) everywhere on the way, between waypoints too (seedlings break: 2026-11-05 the carry tipped it up to 90 deg)")
     ap.add_argument("--dynamics", type=float, default=None, help="one factor for all moves (default: robot.dynamics / fine_dynamics in the config)")
     args = ap.parse_args()
