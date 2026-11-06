@@ -35,6 +35,8 @@ def main() -> int:
     ap.add_argument("--pitch-deg", type=float, nargs="+", default=None, help="grasp pitches to try (65 plan; default from the config)")
     ap.add_argument("--no-return", action="store_true", help="after placing, stay above the disc (72 goes straight on to the next "
                     "plant's observation pose; the tray and disc are located once per run)")
+    ap.add_argument("--program", action="store_true", help="the plan steps from the taught program (76 grasp / place: the "
+                    "template moved to this cell and hole, no search); needs --place HOLE")
     ap.add_argument("--max-replans", type=int, default=2, help="grasp planned again (another pose) this often when no placement is found from it")
     ap.add_argument("--hold-s", type=float, default=0.5, help="pause at the top of the lift (2 s until 2026-11-02)")
     ap.add_argument("--place", type=int, nargs="?", const=0, default=None, metavar="HOLE",
@@ -54,10 +56,17 @@ def main() -> int:
              ("approach", ["scripts/65_side_grasp.py", "approach", *c]),
              ("close", ["scripts/66_gripper.py", "close"]),
              ("lift", ["scripts/65_side_grasp.py", "lift", *c])]
+    if args.program:
+        if not args.place:
+            print("--program needs --place HOLE")
+            return 1
+        steps[1] = ("plan", ["scripts/76_program.py", "grasp", *c, "--hole", str(args.place)])
+        args.max_replans = 0
     if args.place is not None:
         h = [] if args.place == 0 else ["--hole", str(args.place)]
         # the place plan right after the grasp plan: refuse before touching the plant if the hole is out of reach
-        steps.insert(2, ("plan the placement", ["scripts/71_place_in_disc.py", "plan", *c, *h]))
+        steps.insert(2, ("plan the placement", ["scripts/76_program.py", "place", *c, *h] if args.program
+                         else ["scripts/71_place_in_disc.py", "plan", *c, *h]))
         steps += [("carry to the disc", ["scripts/71_place_in_disc.py", "carry", *c]),
                   ("insert into the hole", ["scripts/71_place_in_disc.py", "insert", *c]),
                   ("open", ["scripts/66_gripper.py", "open"]),

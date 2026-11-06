@@ -1,0 +1,400 @@
+#!/usr/bin/env python
+"""The transplant job as an industrial pick-and-place program (seedling.program): taught once per layout, each
+plant is the same template moved to its cell and hole. Writes the plan files the motion phases of 65 / 71 execute
+({cell}_side_plan.json, {cell}_place_plan.json), so 69 runs it unchanged.
+
+    76_program.py build                    # after 60 located tray and disc: teach, then check the whole job
+    76_program.py grasp --cell C8 [--from-observe]   # the grasp for this cell (soil from the close-up if there is one)
+    76_program.py place --cell C8 --hole 3            # carrying it into this hole
+"""
+from __future__ import annotations
+
+import _common  # noqa: F401  (first: caps math threads, sets project paths)
+
+import json
+import time
+
+import numpy as np
+
+from _common import base_parser, config_from_args
+
+from seedling.config import PROJECT_DIR
+
+OUT = PROJECT_DIR / "experiments" / "grasp"
+PROG = OUT / "program.json"
+
+
+def main() -> int:
+    ap = base_parser(__doc__)
+    ap.add_argument("action", choices=["build", "grasp", "place"])
+    ap.add_argument("--cell")
+    ap.add_argument("--hole", type=int, help="grasp / place: the hole the plant goes into (it decides the arm configuration)")
+    ap.add_argument("--from-observe", action="store_true", help="grasp: from the observation pose the cycle goes to first "
+                    "(worked out as from the overview), not from where the arm is")
+    ap.add_argument("--ignore-cells", default="", help="comma list: cells known to be empty now")
+    ap.add_argument("--approach-deg", type=float, default=15.0, help="build: the approach direction for every cell, turned "
+                    "this far towards the robot's right from straight out at the tray's centre (plants taken right to left)")
+    ap.add_argument("--finger-clearance-mm", type=float, default=3.0)
+    ap.add_argument("--reteach", action="store_true", help="build: teach again even if the layout did not change")
+    args = ap.parse_args()
+    cfg = config_from_args(args)
+
+    from seedling.calibration import load_T_FC
+    from seedling.program import Program
+    from seedling.world import World
+
+    t0 = time.time()
+    T_FC, _ = load_T_FC(cfg)
+    grid = json.loads((PROJECT_DIR / cfg["tray"]["grid_file"]).read_text())
+    disc = json.loads((PROJECT_DIR / "calibration" / "disc.json").read_text())
+    gone = set(filter(None, args.ignore_cells.split(",")))
+    planted = [k for k in (grid.get("planted") or grid.get("occupied", [])) if k not in gone]
+    occupied = [k for k in grid.get("occupied", []) if k not in gone]
+    free = list(disc.get("free_holes", []))
+    taken = [h for h in range(1, len(disc["holes"]) + 1) if h not in free]
+    prog = Program(cfg, T_FC, grid, disc, approach_deg=args.approach_deg)
+    worlds = {}
+
+    def world_disc(extra_taken=(), plants=None, held=None):
+        key = (tuple(sorted(set(taken) | set(extra_taken))), tuple(plants if plants is not None else planted), held)
+        if key not in worlds:
+            worlds[key] = World(cfg, T_FC, grid, disc, tray_plants=list(key[1]), taken_holes=list(key[0]),
+                                held_below_m=held, hold_forward_m=prog.fwd if held else 0.0)
+        return worlds[key]
+
+    def check_pieces(world, q0, wps, **kw):
+        qa = np.asarray(q0, float)
+        for qb in wps:
+            m, where = world.worst(qa, qb, **kw)
+            if m < 0:
+                return f"{where} {m * 1000:+.0f} mm"
+            qa = qb
+        return ""
+
+    # ---- build -----------------------------------------------------------------------------------------------------
+    if args.action == "build":
+        from seedling.order import plant_order
+
+        plants = plant_order(grid, occupied)
+        if not plants:
+            print("no plants in the tray")
+            return 1
+        # taught once per layout: the program of the last build is used again when the tray and the disc are where they
+        # were (within 5 mm / 1 deg) and it was made with the same approach direction
+        old = json.loads(PROG.read_text()) if PROG.exists() and not args.reteach else None
+        if old is not None and old.get("configs") and prog.same_layout(old.get("layout", {})) and \
+                abs(float(old.get("approach_deg", -999)) - args.approach_deg) < 1e-6:
+            prog.load(old)
+            print(f"the tray and the disc are where they were: the program taught then is used ({len(prog.configs)} configuration(s))")
+            ok = True
+        else:
+            ok = prog.teach(plants, world_disc(), lambda filled: world_disc(filled))
+            PROG.write_text(json.dumps({**prog.to_dict(), "approach_deg": args.approach_deg}, indent=1))
+        if not ok:
+            return 1
+        # the whole job once, in its order (each plant's cell gone after it, each hole taken after it): which plants and
+        # holes the program reaches
+        holes = [h for h in prog.hole_order if h in free and any(h in c_["hole_heading"] for c_ in prog.configs)]
+        print(f"the job: {len(plants)} plants, {len(holes)} free holes the program reaches (of {len(free)} free)")
+        done, left_holes = [], list(holes)
+        for k in plants:
+            if not left_holes:
+                break
+            why_k = []
+            for h in left_holes:
+                ci = prog.config_for(k, h)
+                if ci is None:
+                    why_k.append(f"H{h}: no taught configuration reaches it")
+                    continue
+                r = grasp_plan(prog, k, cfg, grid, disc, None, [p for p in planted if p not in done], world_disc, check_pieces,
+                               soil_info(grid, k, None, prog.tray_top), args, write=False, ci=ci)
+                if isinstance(r, str):
+                    why_k.append(f"H{h}: no grasp ({r})")
+                    continue
+                taken_before = [x for x in holes if x not in left_holes]
+                pl = place_plan(prog, k, h, r, [p for p in planted if p not in done + [k]], world_disc, check_pieces,
+                                extra_taken=taken_before, write=False)
+                if isinstance(pl, str):
+                    why_k.append(f"H{h}: {pl}")
+                    continue
+                print(f"  {k} -> H{h} (configuration {ci + 1})")
+                done.append(k)
+                left_holes.remove(h)
+                break
+            else:
+                print(f"  {k}: not in this program ({'; '.join(why_k[:2])})")
+        print(f"program built in {time.time() - t0:.1f} s")
+        return 0
+
+    prog.load(json.loads(PROG.read_text()))
+    if args.action == "grasp":
+        ci = prog.config_for(args.cell, args.hole)
+        if ci is None:
+            print(f"{args.cell}: no taught configuration reaches it and lets go into H{args.hole}")
+            return 1
+        robot_q = None
+        obs_from = None
+        if args.from_observe:
+            pl = observe_pose(cfg, grid, args.cell, T_FC, prog.tray_top)
+            if not pl.ok:
+                print("no safe observation pose:", pl.tried[-3:])
+                return 1
+            q_ov = np.array(cfg["tray"]["overview_q"], float)
+            obs_from = {"observe_from": q_ov.tolist(), "observe_q": pl.q.tolist(), "observe_desc": pl.desc,
+                        "observe_cell_xyz": [float(v) for v in grid["cells"][args.cell]]}
+            robot_q = pl.q
+        else:
+            from seedling.robot import FrankyRobot
+
+            robot_q = FrankyRobot(cfg, step_mode=False).q()
+        obs_file = OUT / f"{args.cell}_observe.json"
+        obs = json.loads(obs_file.read_text()) if obs_file.exists() and not args.from_observe else None
+        si = soil_info(grid, args.cell, obs, prog.tray_top)
+        if obs is not None:
+            obs["soil_used"] = si["soil"]
+            obs_file.write_text(json.dumps(obs, indent=1))
+        r = grasp_plan(prog, args.cell, cfg, grid, disc, robot_q, planted, world_disc, check_pieces, si, args,
+                       write=True, obs_from=obs_from, finger_floor=finger_floor_fn(cfg, args, si, obs, T_FC), ci=ci)
+        if isinstance(r, str):
+            print(f"{args.cell}: no grasp in the program ({r})")
+            return 1
+        print(f"grasp planned in {time.time() - t0:.1f} s")
+        return 0
+
+    # place
+    gp = json.loads((OUT / f"{args.cell}_side_plan.json").read_text())
+    if args.hole not in free:
+        print(f"refused: H{args.hole} is taken; free: {free}")
+        return 1
+    left = [k for k in planted if k != args.cell]
+    pl = place_plan(prog, args.cell, args.hole, gp, left, world_disc, check_pieces, write=True)
+    if isinstance(pl, str):
+        print(f"{args.cell}: not into H{args.hole} ({pl})")
+        return 1
+    print(f"placement planned in {time.time() - t0:.1f} s")
+    return 0
+
+
+def soil_info(grid, cell, obs, tray_top, disagree=0.008, plug_dz=0.013, leafy_cover=0.35):
+    """the soil surface of this plug and the closing height above it (as 65: close measurement, overview, fallback)"""
+    from seedling.program import HEIGHT_EST, HEIGHT_LEAFY, HEIGHT_SURE
+
+    z_ov = (grid.get("soil_z_overview") or {}).get(cell)
+    z_near = obs["measure"]["soil_z"] if obs and obs["measure"].get("ok") else None
+    off_c = obs and np.hypot(*obs["measure"].get("shift_mm", [0, 0])) > 12.0
+    fb = tray_top + plug_dz
+    if z_near is not None and z_ov is not None and off_c and z_near > z_ov + 0.003:
+        soil, src, sure = z_ov, "overview (the close patch was off the cell centre)", True
+    elif z_near is not None and z_ov is not None and abs(z_near - z_ov) > disagree:
+        soil, src = max(z_near, z_ov), "overview and close disagree: the higher"
+        sure = soil == z_near
+    elif z_near is not None:
+        soil, src, sure = z_near, "close measurement", True
+    elif z_ov is not None:
+        soil, src, sure = (z_ov, "overview", False) if z_ov >= fb else (fb, "overview below the usual plug height: tray top + 13 mm", False)
+    else:
+        soil, src, sure = fb, "NOT MEASURED: tray top + 13 mm", False
+    h = HEIGHT_SURE if sure else HEIGHT_EST
+    cov = (obs or {}).get("leaf_cover")
+    if sure and cov is not None and cov > leafy_cover:
+        h = min(h, HEIGHT_LEAFY)
+    return {"soil": float(soil), "src": src, "sure": sure, "height": h}
+
+
+def finger_floor_fn(cfg, args, si, obs, T_FC):
+    """lowest closing height whose open finger bottoms clear the neighbouring soil under their tracks (65), or None"""
+    if not si["sure"] or obs is None:
+        return None
+    npz = OUT / f"{args.cell}_observe.npz"
+    if not npz.exists():
+        return None
+    from seedling import kinematics
+    from seedling.camera import Frame
+    from seedling.plugsense import substrate_mask
+    from seedling.stemline import _mask
+    from seedling.transforms import apply_T
+
+    fr = Frame.load(npz)
+    okp = np.isfinite(fr.xyz).all(-1) & substrate_mask(fr.rgb, cfg["stemline"]) & ~_mask(fr.rgb, cfg["stemline"])
+    P = apply_T(kinematics.fk_flange(np.array(obs["q"])) @ T_FC, fr.xyz[okp])
+
+    def floor(c, yaw):
+        ah = np.array([np.cos(yaw), np.sin(yaw)])
+        d = P[:, :2] - c[:2]
+        s_ = d @ ah
+        lat = np.abs(d @ np.array([-ah[1], ah[0]]))
+        m = (lat > 0.012) & (lat < 0.034) & (s_ > -0.045) & (s_ < 0.015)
+        if m.sum() < 30:
+            return None
+        return float(np.percentile(P[m, 2] + args.finger_clearance_mm / 1000 + 0.0145, 98))
+
+    return floor
+
+
+def observe_pose(cfg, grid, cell, T_FC, tray_top):
+    """the observation pose of 65 (camera ~0.34 m above the cell, looking down), as from the overview pose"""
+    import copy
+
+    from seedling.wrist import plan_observation
+
+    c = np.array(grid["cells"][cell], float)
+    guess = (grid.get("soil_z_overview") or {}).get(cell) or tray_top + 0.013
+    c2 = copy.deepcopy(cfg)
+    c2["tray"]["observe"].update(distance_m=0.34, elevation_deg=[65, 55, 70, 75, 80], azimuth_offsets_deg=[0, -20, 20, -40, 40],
+                                 min_clearance_m=0.15, all_elevations=True, elevation_penalty_deg=2.0)
+    return plan_observation(np.array([c[0], c[1], guess]), np.array(cfg["tray"]["overview_q"], float), T_FC, guess + 0.15, c2)
+
+
+def grasp_plan(prog, cell, cfg, grid, disc, q_start, planted, world_disc, check_pieces, si, args, write=False,
+               obs_from=None, finger_floor=None, ci=0):
+    """the template at this cell: the plan dict (65's format), or why not (str)"""
+    from seedling.program import RIM
+    from seedling.planner import plan_path
+
+    soil, height = si["soil"], si["height"]
+    z_cap = soil + max(height, 0.035)
+    z_close = max(soil + height, prog.tray_top + RIM)
+    c = np.array(grid["cells"][cell], float)
+    if finger_floor is not None:
+        zf = finger_floor(c, prog.yaw)
+        if zf is not None and zf > z_close:
+            print(f"closing point raised {(zf - z_close) * 1000:.0f} mm: the open fingers clear the neighbouring soil")
+            z_close = zf
+    w_at = world_disc()  # at the plant: fingers and plants not checked (the heading keeps the hand off the others)
+    for _ in range(4):
+        P = prog.cell_poses(cell, z_close)
+        q_g, why = prog.grasp_joints(P["grasp"], ci)
+        if q_g is None:
+            return why
+        cl = w_at.clearances(q_g, fingers=False, plants=False)
+        worst = min(cl.values(), key=lambda v: v[0])
+        if worst[0] >= 0:
+            break
+        if not worst[1].endswith(("- tray", "- table")) or z_close - worst[0] + 0.003 > z_cap + 1e-6:
+            return f"the grasp itself: {worst[1]} {worst[0] * 1000:+.0f} mm"
+        print(f"closing point raised {(-worst[0] + 0.003) * 1000:.0f} mm ({worst[1]} {worst[0] * 1000:+.0f} mm)")
+        z_close -= worst[0] - 0.003
+    else:
+        return "the grasp itself: too close to the tray"
+    tpl, why = prog.template(q_g, P)
+    if tpl is None:
+        return why
+    for name, q0, wps in tpl["pieces"]:
+        bad = check_pieces(w_at, q0, wps, fingers=False, plants=False)
+        if bad:
+            return f"{name}: {bad}"
+    vias = []
+    if q_start is not None:
+        # the turn from where the arm is (the observation pose) to the stage: one joint move if it is clear of
+        # everything (the plants too), else through the pose straight above the stage, else a path
+        scene = world_disc(plants=sorted(set(planted) | {cell}))
+        q_st = tpl["stage"]
+        if scene.worst(q_start, q_st)[0] < 0:
+            T_hi = P["stage"].copy()
+            T_hi[2, 3] += 0.10
+            up, _w = prog.chain(q_st, [("above the stage", T_hi)])
+            ok_hi = False
+            if up is not None:
+                q_hi = up[0][1][-1]
+                dn, _w = prog.chain(q_hi, [("down to the stage", P["stage"])])
+                if dn is not None and scene.worst(q_start, q_hi)[0] >= 0 and not check_pieces(scene, q_hi, dn[0][2]):
+                    vias = [q_hi] + list(dn[0][2][:-1])
+                    ok_hi = True
+            if not ok_hi:
+                path = plan_path(q_start, q_st, scene.ok, time_s=3.0)
+                if path is None:
+                    return "no safe turn from the observation pose to the stage"
+                vias = list(path[:-1])
+    yaw_rel = float(np.degrees((prog.yaw - np.arctan2(c[1], c[0]) + np.pi) % (2 * np.pi) - np.pi))
+    plan = {"cell": cell, "close_point": P["close"].tolist(), "offset_mm": [0.0, 0.0], "R": prog.R.tolist(),
+            "q": {"start": (q_start if q_start is not None else tpl["stage"]).tolist(), "stage": tpl["stage"].tolist(),
+                  "pregrasp": tpl["pregrasp"].tolist(), "grasp": tpl["grasp"].tolist(), "lift": tpl["lift"].tolist()},
+            "vias": [np.asarray(v).tolist() for v in vias],
+            **{f"{n}_vias": [np.asarray(w).tolist() for w in wps[:-1]] for n, _q0, wps in tpl["pieces"]},
+            "z_close": round(float(z_close), 4), "tray_top": round(prog.tray_top, 4), "yaw": prog.yaw, "soil_z": si["soil"],
+            **(obs_from or {}), "cell_xy": [float(v) for v in c[:2]], "program": True, "config": ci, "safe": True}
+    if write:
+        print(f"soil surface of {cell}: z {si['soil']:.3f} ({(si['soil'] - prog.tray_top) * 1000:+.0f} mm vs the tray top) from {si['src']}")
+        print(f"cell {cell}: closing point {np.round(P['close'], 4).tolist()}, {(z_close - si['soil']) * 1000:.0f} mm above the soil; "
+              f"the turn {'one joint move' if not vias else f'through {len(vias)} via pose(s)'}")
+        print(f"approach pitched 0 deg down, heading {yaw_rel:+.0f} deg from straight out (the program's direction); camera above the gripper")
+        (OUT / f"{cell}_side_plan.json").write_text(json.dumps(plan, indent=1))
+        print("plan saved", (OUT / f"{cell}_side_plan.json").relative_to(PROJECT_DIR))
+    return plan
+
+
+def place_plan(prog, cell, hole, gp, left, world_disc, check_pieces, extra_taken=(), write=False):
+    """the template from this grasp into this hole: the plan dict (71's format), or why not (str)"""
+    from seedling.program import HEADINGS, MAX_TILT, PLUG
+
+    q_lift = np.array(gp["q"]["lift"])
+    soil = gp.get("soil_z", gp["close_point"][2] - 0.035)
+    below = float(gp["close_point"][2] - soil + PLUG)
+    T_l = prog.G_of(q_lift)
+    T_up = T_l.copy()
+    T_up[2, 3] = prog.z_carry(T_l[2, 3], below)
+    taken_now = list(extra_taken)
+    w_carry = world_disc(taken_now, plants=left, held=below)
+    w_after = world_disc(taken_now + [hole], plants=left)
+    up, why = prog.chain(q_lift, [("up", T_up)], max_tilt=MAX_TILT)
+    if up is None:
+        return f"straight up: {why}"
+    bad = check_pieces(w_carry, q_lift, up[0][2], plants=False, plug=False)
+    if bad:
+        return f"straight up: {bad}"
+    q_up = up[0][1][-1]
+    taught = prog.configs[int(gp.get("config", 0))]["hole_heading"] if prog.configs else {}
+    heads = ([taught[hole]] if hole in taught else []) + [h for h in HEADINGS if h != taught.get(hole)]
+    last = "no heading"
+    for dy in heads:
+        for raise_m in (0.0, 0.01, 0.02, 0.03):
+            H = prog.hole_poses(hole, dy, below, raise_m)
+            q_ac, carry = prog.carry(q_up, T_up, H["at"](T_up[2, 3]))
+            if q_ac is None:
+                last = f"heading {dy:+.0f}: no straight flat carry"
+                break
+            bad = check_pieces(w_carry, q_up, carry)
+            if bad:
+                last = f"heading {dy:+.0f}: carry {bad}"
+                break
+            pin, why = prog.chain(q_ac, [("above", H["above"]), ("insert", H["insert"])], max_tilt=MAX_TILT)
+            if pin is None:
+                last = f"heading {dy:+.0f}: {why}"
+                break
+            bad = check_pieces(w_carry, q_ac, pin[0][2]) or check_pieces(w_carry, pin[0][1][-1], pin[1][2], plug=False)
+            q_ins = pin[1][1][-1]
+            pout, why = prog.chain(q_ins, [("back", H["back"]), ("up after", H["up after"])])
+            if pout is None:
+                last = f"heading {dy:+.0f}: {why}"
+                break
+            bad = bad or check_pieces(w_after, q_ins, pout[0][2], ignore=(f"plant in H{hole}",)) or \
+                check_pieces(w_after, pout[0][1][-1], pout[1][2])
+            if bad:
+                last = f"heading {dy:+.0f}, let go {raise_m * 1000:.0f} mm higher: {bad}"
+                continue  # letting go higher may clear it
+            in_w = list(pin[0][2]) + list(pin[1][2])
+            out_w = list(pout[0][2]) + list(pout[1][2])
+            plan = {"cell": cell, "hole": hole, "hole_xy": prog.holes[hole - 1].tolist(),
+                    "q": {"up_vias": [w.tolist() for w in up[0][2][:-1]], "up": q_up.tolist(),
+                          "vias": [w.tolist() for w in carry[:-1]], "across": q_ac.tolist(),
+                          "in_vias": [w.tolist() for w in in_w[:-1]], "insert": q_ins.tolist(),
+                          "out_vias": [w.tolist() for w in out_w[:-1]], "up after": out_w[-1].tolist()},
+                    "start": q_lift.tolist(), "release_raised_mm": round(raise_m * 1000, 1), "below_mm": round(below * 1000, 1),
+                    "dyaw": float(dy), "program": True, "safe": True}
+            if write:
+                from seedling import cartesian
+
+                tl = max(cartesian.max_tilt_between(a_, b_, prog.F, prog.G) for a_, b_ in zip([q_up] + carry[:-1], carry))
+                if dy != taught.get(hole):
+                    print(f"H{hole}: the taught heading did not work now, {dy:+.0f} deg instead")
+                print(f"hole H{hole}: hand heading {dy:+.0f} deg from straight out; plug bottom {below * 1000:.0f} mm below the held stem; "
+                      f"carried {len(carry)} straight piece waypoints, the hand at most {tl:.1f} deg from flat; "
+                      + (f"let go {raise_m * 1000:.0f} mm higher" if raise_m else "let go with the plug bottom at the disc top"))
+                (OUT / f"{cell}_place_plan.json").write_text(json.dumps(plan, indent=1))
+                print("place plan saved")
+            return plan
+    return last
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
