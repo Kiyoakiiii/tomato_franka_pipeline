@@ -397,6 +397,24 @@ def main() -> int:
         occupied = [np.array(grid["cells"][k][:2]) for k in obstacles]
         radial = np.arctan2(c[1], c[0])
 
+        def hand_clearance(yaw):
+            """how far the other plants' stems (cell centres) stay from what the open hand sweeps on its way in, in the
+            plane of the grasp: the open fingers (a finger outside each side of the 44 mm gap: 31 mm either side) from
+            15 mm past the stem to 75 mm behind it, the gripper body (45 mm either side) behind that, the pre-grasp
+            standoff added. 2026-11-05: headings were tried straightest first whichever side the neighbours were on, and
+            C9 (the right end of its row, its neighbour C8 on the left) was approached from the left past C8"""
+            back = -np.array([np.cos(yaw), np.sin(yaw)])
+            lat_ax = np.array([-back[1], back[0]])
+            so = args.standoff_mm / 1000.0
+            boxes = [(-0.015, 0.075, 0.031), (0.075, 0.18 + so, 0.045)]  # (from, to behind the stem, half width)
+            best = np.inf
+            for o in occupied:
+                d = o - c[:2]
+                s_, l_ = float(d @ back), abs(float(d @ lat_ax))
+                for s0, s1, hw in boxes:
+                    best = min(best, float(np.hypot(max(0.0, s0 - s_, s_ - s1), max(0.0, l_ - hw))))
+            return best
+
         def blocked(yaw, pitch_deg):
             reach = 0.14 if pitch_deg >= 26 else min(0.30, 0.14 * np.tan(np.radians(26)) / max(np.tan(np.radians(pitch_deg)), 1e-6))
             back = -np.array([np.cos(yaw), np.sin(yaw)])
@@ -443,7 +461,7 @@ def main() -> int:
             need = soilP[m, 2] + args.finger_clearance_mm / 1000 + 0.0145
             return float(np.percentile(need, 98))
 
-        accept_first = [False]
+        accept_first, d0_ = [False], [0.0]
         # the plan made when this plant was chosen (72: from the predicted observation pose) is used as it is when the
         # arm is at that pose now and its closing point still comes out the same (within 3 mm, with the close-up's
         # soil and the neighbours' soil under the finger tracks) (2026-11-04: planning twice per plant cost ~15 s)
@@ -461,9 +479,7 @@ def main() -> int:
                         return 0
                     print(f"planned again: the closing point moved {(z_new - float(old_['close_point'][2])) * 1000:+.0f} mm since the plant was chosen")
                     # the heading chosen then (and its neighbours) first, and the first safe plan is taken
-                    d0 = float(np.degrees((float(old_["yaw"]) - radial + np.pi) % (2 * np.pi) - np.pi))
-                    hs = sorted(args.headings_deg, key=lambda h_: abs(h_ - d0))
-                    args.headings_deg[:] = hs
+                    d0_[0] = float(np.degrees((float(old_["yaw"]) - radial + np.pi) % (2 * np.pi) - np.pi))
                     accept_first[0] = True
             except Exception:  # noqa: BLE001  (an old plan file: plan again)
                 pass
@@ -485,6 +501,15 @@ def main() -> int:
         # the free moves (the turn to the stage) are checked against everything, the plants too (this one included)
         scene = World(cfg, T_FC, grid, disc_now, tray_plants=obstacles + [args.cell])
 
+        # headings in order of cost: degrees off straight (or, planning again, off the one chosen before) plus 5 per mm
+        # the open hand comes closer than 15 mm to another plant's stem on its way in, those closer than 5 mm last:
+        # straight first, then from the side with no plants (with the plants taken right to left: the right). C9
+        # 2026-11-05 (C8 on its left): -20 deg 9 mm, -30 4 mm, -40 0; 0..+40 11-15 mm
+        clr_ = {h_: hand_clearance(radial + np.radians(h_)) for h_ in args.headings_deg}
+        cost_ = {h_: abs(h_ - d0_[0]) + 5.0 * max(0.0, 15.0 - clr_[h_] * 1000) + (1000.0 if clr_[h_] < 0.005 else 0.0) for h_ in clr_}
+        args.headings_deg[:] = sorted(args.headings_deg, key=lambda h_: cost_[h_])
+        print("headings by clearance from the other plants: " + ", ".join(f"{h_:+.0f} ({min(clr_[h_], 0.099) * 1000:.0f} mm)"
+                                                                          for h_ in args.headings_deg[:6]) + ", ...")
         for pitch in pitches:
             pt = np.radians(pitch)
             for dyaw in args.headings_deg:
