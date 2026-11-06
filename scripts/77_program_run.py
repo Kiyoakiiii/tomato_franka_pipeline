@@ -124,7 +124,7 @@ def _run(args, cfg, gdir, stop, run, env_plan, sim=False) -> int:
         """until the build has decided about plant k (k None: until the taught configurations are there), or finished"""
         while True:
             pr = program()
-            if pr is not None and ((k is None and pr.get("configs")) or k in pr.get("cells", {}) or k in pr.get("no_way", {})
+            if pr is not None and ((k is None and (pr.get("configs") or pr.get("cells"))) or k in pr.get("cells", {}) or k in pr.get("no_way", {})
                                    or not pr.get("building", True)):
                 return pr
             if build.poll() is not None:
@@ -146,7 +146,9 @@ def _run(args, cfg, gdir, stop, run, env_plan, sim=False) -> int:
             rg, _o = run(["scripts/76_program.py", "grasp", "--cell", k, "--from-observe", *ig], quiet=True, env=env_plan)
             if rg != 0:
                 continue
-            for hole in free:
+            # the hole the program meant for it first (the others' holes kept for them), then the other free ones
+            mine = pr["cells"][k].get("hole")
+            for hole in ([mine] if mine in free else []) + [h for h in free if h != mine]:
                 if hole in extra_taken:
                     continue
                 rp, _o = run(["scripts/76_program.py", "place", "--cell", k, "--hole", str(hole), *ig,
@@ -172,7 +174,7 @@ def _run(args, cfg, gdir, stop, run, env_plan, sim=False) -> int:
             grid, disc = json.loads(gf.read_text()), json.loads(df.read_text())
             if hole_order is None:
                 pr = wait_for(None)
-                if pr is None or not pr.get("configs"):
+                if pr is None or not (pr.get("configs") or pr.get("cells")):
                     build.wait()
                     print("\n".join(build_lines()[-6:]))
                     print("no program for this layout: stopped")
