@@ -243,6 +243,20 @@ def main() -> int:
             if not r.ok:
                 print("motion failed:", r.reason)
                 return None
+        import os
+
+        if os.environ.get("SEEDLING_SIM_SOIL_DZ"):
+            # the whole-run simulation (scripts/80): the close-up "measures" the soil this much off the overview's value
+            # (per cell, uniformly in [lo, hi] from the seed): no camera
+            import zlib
+
+            lo_, hi_, seed_ = os.environ["SEEDLING_SIM_SOIL_DZ"].split(",")
+            u_ = (zlib.crc32(f"{args.cell}:{seed_}".encode()) % 10000) / 10000.0
+            z_ov_ = (grid.get("soil_z_overview") or {}).get(args.cell) or tray_top + 0.013
+            z_m = float(z_ov_) + float(lo_) + u_ * (float(hi_) - float(lo_))
+            print(f"{tag}: (simulated) soil z {z_m:.3f} ({(z_m - tray_top) * 1000:+.0f} mm vs the tray top)")
+            return {"q": robot.q().tolist(), "measure": {"ok": True, "soil_z": z_m, "n": 0, "shift_mm": [0.0, 0.0]},
+                    "stem": None, "leaf_cover": 0.0, "overview": z_ov_}
         time.sleep(0.5)
         cam = ZedCamera(cfg)
         try:
@@ -802,14 +816,17 @@ def main() -> int:
         from seedling.gripper import make_gripper
         import termios
 
-        g = make_gripper(cfg, sim=False, step_mode=False)
-        g.open()
-        ser = g.dev.ser
-        g.dev.running = False
-        attrs = termios.tcgetattr(ser.fd)
-        attrs[2] &= ~termios.HUPCL
-        termios.tcsetattr(ser.fd, termios.TCSANOW, attrs)
-        ser.close()
+        import os
+
+        if not os.environ.get("SEEDLING_SIM_STATE"):  # (the whole-run simulation has no gripper)
+            g = make_gripper(cfg, sim=False, step_mode=False)
+            g.open()
+            ser = g.dev.ser
+            g.dev.running = False
+            attrs = termios.tcgetattr(ser.fd)
+            attrs[2] &= ~termios.HUPCL
+            termios.tcsetattr(ser.fd, termios.TCSANOW, attrs)
+            ser.close()
         for i_, qv in enumerate(plan.get("vias", [])):  # the turn, through the via poses of the path search
             if not move(np.array(qv), args.dynamics, f"turn (via pose {i_ + 1}/{len(plan['vias'])})"):
                 return 1

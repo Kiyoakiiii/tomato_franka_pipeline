@@ -55,7 +55,7 @@ def main() -> int:
         d = u * dr / 100 + left * dl / 100
         shift = f"{d[0]:.4f},{d[1]:.4f},{dz / 100:.4f}"
         cmd = [sys.executable, "-u", "scripts/76_program.py", "build", "--reteach", "--free", ",".join(str(h) for h in range(1, n_holes + 1)),
-               "--shift-tray" if args.tray else "--shift-disc", shift]
+               ("--shift-tray=" if args.tray else "--shift-disc=") + shift]
         t0 = time.time()
         r = subprocess.run(cmd, cwd=PROJECT_DIR, capture_output=True, text=True, env=env)
         out = r.stdout + r.stderr

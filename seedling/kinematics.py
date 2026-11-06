@@ -125,8 +125,38 @@ def _frames(q: np.ndarray, F_T_EE: np.ndarray) -> tuple[list[np.ndarray], np.nda
     return frames, T @ _dh(0.0, FLANGE_D, 0.0, 0.0) @ F_T_EE
 
 
+def _exp(rv: np.ndarray) -> np.ndarray:
+    """Rotation matrix of a rotation vector (Rodrigues; scipy's Rotation cost ~20% of the planning time, 2026-11-05)"""
+    th = math.sqrt(float(rv @ rv))
+    if th < 1e-12:
+        return np.eye(3)
+    k = rv / th
+    K = np.array([[0.0, -k[2], k[1]], [k[2], 0.0, -k[0]], [-k[1], k[0], 0.0]])
+    return np.eye(3) + math.sin(th) * K + (1.0 - math.cos(th)) * (K @ K)
+
+
+_JCOLS = None
+
+
 def _jacobian(q: np.ndarray, target: np.ndarray, F_T_EE: np.ndarray, rot_weight: float) -> np.ndarray:
-    """Geometric Jacobian of ``_residual`` (rotation part linearised around zero error)."""
+    """Geometric Jacobian of ``_residual`` (rotation part linearised around zero error): pinocchio's frame Jacobian
+    (C++) moved to the EE point when pinocchio is there (the Python product over the joints was a third of the
+    planning time, 2026-11-05), else the joint frames' axes"""
+    global _JCOLS
+    P = _pin()
+    if P is not None:
+        pin, model, data, fid, jids = P
+        if _JCOLS is None:
+            _JCOLS = [model.joints[j].idx_v for j in jids]
+        pin.computeJointJacobians(model, data, np.asarray(q, dtype=float) + JOINT_OFFSETS)
+        pin.updateFramePlacements(model, data)
+        J6 = pin.getFrameJacobian(model, data, fid, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)[:, _JCOLS]
+        Mf = data.oMf[fid].homogeneous
+        r = (Mf @ F_T_EE)[:3, 3] - Mf[:3, 3]
+        Jw = J6[3:]
+        Sr = np.array([[0.0, -r[2], r[1]], [r[2], 0.0, -r[0]], [-r[1], r[0], 0.0]])
+        Jlin = J6[:3] - Sr @ Jw  # v at the EE point = v at the flange + w x r
+        return np.vstack([Jlin, rot_weight * (target[:3, :3].T @ Jw)])
     frames, T = _frames(q, F_T_EE)
     pe = T[:3, 3]
     J = np.zeros((6, 7))
@@ -210,14 +240,17 @@ def _gn_pull(q, target, F_T_EE, rot_weight, q_prev, pull, lo, hi, iters: int = 6
         g = J.T @ r + P2 * (x - q_prev)
         H = J.T @ J + (P2 + 1e-9) * np.eye(7)
         free = ~(((x <= lo + eps) & (g > 0)) | ((x >= hi - eps) & (g < 0)))  # descent would leave the limit
-        dx = np.zeros(7)
-        if free.any():
-            dx[free] = -np.linalg.solve(H[np.ix_(free, free)], g[free])
+        if free.all():
+            dx = -np.linalg.solve(H, g)
+        else:
+            dx = np.zeros(7)
+            if free.any():
+                dx[free] = -np.linalg.solve(H[np.ix_(free, free)], g[free])
         s = float(np.abs(dx).max())
         if s > 0.3:
             dx *= 0.3 / s
         xn = np.clip(x + dx, lo, hi)
-        if float(np.abs(xn - x).max()) < 1e-8:
+        if float(np.abs(xn - x).max()) < 1e-7:
             return xn
         x = xn
     return x
@@ -239,14 +272,14 @@ def solve_ik_near(
     lo, hi = Q_MIN + limit_margin_rad, Q_MAX - limit_margin_rad
     q = np.clip(np.asarray(q_start, dtype=float), lo, hi)
     T0 = fk(q, F_T_EE)
-    dR = Rotation.from_matrix(target_T_BE[:3, :3] @ T0[:3, :3].T).as_rotvec()
+    dR = _rotvec(target_T_BE[:3, :3] @ T0[:3, :3].T)
     rot_weight = 0.2
     if steps is None:  # a step per 3 cm or 6 deg (10 steps for every move until 2026-11-04, most of the planning time)
         steps = int(np.clip(np.ceil(max(np.linalg.norm(target_T_BE[:3, 3] - T0[:3, 3]) / 0.03,
                                         np.linalg.norm(dR) / np.radians(6.0))), 1, 10))
     for k in range(1, steps + 1):
         Tk = T0.copy()
-        Tk[:3, :3] = Rotation.from_rotvec(dR * k / steps).as_matrix() @ T0[:3, :3]
+        Tk[:3, :3] = _exp(dR * k / steps) @ T0[:3, :3]
         Tk[:3, 3] = T0[:3, 3] + (target_T_BE[:3, 3] - T0[:3, 3]) * k / steps
         q_prev = q.copy()
         # residual + weak pull towards the previous joints, within the limits: Gauss-Newton on the stacked residual

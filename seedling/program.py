@@ -79,6 +79,12 @@ class Program:
     def chain(self, q0, targets, **kw):
         return cartesian.chain(q0, targets, self.F, self.G, self.margin, **kw)
 
+    def reach(self, q0, targets):
+        """whether a continuous joint solution follows these straight pieces (no waypoints worked out). The fine line:
+        a line twice as coarse (4 cm / 6 deg, joint steps up to 24 deg) said no where the fine one said yes
+        (2026-11-05, C6 into H3 / H5), so it is no filter"""
+        return self.chain(q0, targets, sparse=False)
+
     def cell_poses(self, cell: str, z_close: float, yaw: float | None = None) -> dict:
         """the template's hand poses at this cell, approaching along yaw (default: the program's direction)"""
         R, a = flat_R(yaw) if yaw is not None else (self.R, self.a)
@@ -241,23 +247,7 @@ class Program:
                 continue  # taken already (the world has its plant)
             w = world_disc(filled)
             for dy in HEADINGS:
-                ok = False
-                for raise_m in (0.0, 0.01, 0.02, 0.03):  # letting go higher when the arm comes too close to something there
-                    H = self.hole_poses(h, dy, below, raise_m)
-                    T_ac = H["at"](T_up[2, 3])
-                    reached = False
-                    for r_ in ([("carry", T_ac)], [("turn", make_T(T_ac[:3, :3], T_up[:3, 3])), ("carry", T_ac)]):
-                        full, _w = self.chain(q_up, r_ + [("above", H["above"]), ("insert", H["insert"]), ("back", H["back"]),
-                                                          ("up after", H["up after"])], sparse=False)
-                        if full is None:
-                            continue
-                        reached = True
-                        if w.ok(full[-3][1][-1], plug=False) and w.ok(full[-1][1][-1], plug=False):
-                            ok = True
-                            break
-                    if ok or not reached:
-                        break  # found, or this heading cannot be followed at all (higher does not help)
-                if ok:
+                if self._hole_ok(q_up, T_up, h, dy, below, w, fine=True):
                     out[h] = dy
                     break
             filled.append(h)
@@ -277,7 +267,28 @@ class Program:
         except (KeyError, TypeError):
             return False
 
-    def quick_holes(self, q_lift, below, world, holes) -> dict:
+    def _hole_ok(self, q_up, T_up, h, dy, below, world, fine: bool = False) -> bool:
+        """from q_up (over the tray, at the carry height): the flat carry to above hole h at heading dy (moving and
+        turning together, else turning first) once, then the way in and out for letting go 0-30 mm higher; whether it
+        follows and the release is clear in world (a quick filter)"""
+        H0 = self.hole_poses(h, dy, below)
+        T_ac = H0["at"](T_up[2, 3])
+        go = (lambda q0, t: self.chain(q0, t, sparse=False)) if fine else self.reach  # teaching: the fine line
+        for route in ([("carry", T_ac)], [("turn", make_T(T_ac[:3, :3], T_up[:3, 3])), ("carry", T_ac)]):
+            car, _w = go(q_up, route)
+            if car is None:
+                continue
+            q_ac = car[-1][1][-1]
+            for raise_m in (0.0, 0.01, 0.02, 0.03):  # letting go higher when the arm comes too close to something there
+                H = self.hole_poses(h, dy, below, raise_m)
+                rest, _w = go(q_ac, [("above", H["above"]), ("insert", H["insert"]), ("back", H["back"]), ("up after", H["up after"])])
+                if rest is None:
+                    break  # higher does not help
+                if world.ok(rest[1][1][-1], plug=False) and world.ok(rest[-1][1][-1], plug=False):
+                    return True
+        return False
+
+    def quick_holes(self, q_lift, below, world, holes, prefer: dict | None = None) -> dict:
         """for these holes, the first heading from which a flat hand carried from this lift pose lets go into it (joint
         continuity of the whole way, the release clear in world): {hole: heading}; a quick filter before the plans"""
         T_l = self.G_of(q_lift)
@@ -289,28 +300,20 @@ class Program:
         q_up = pcs[-1][1][-1]
         out = {}
         for h in holes:
-            for dy in HEADINGS:
-                for raise_m in (0.0, 0.01, 0.02, 0.03):
-                    H = self.hole_poses(h, dy, below, raise_m)
-                    T_ac = H["at"](T_up[2, 3])
-                    full, _w = self.chain(q_up, [("carry", T_ac), ("above", H["above"]), ("insert", H["insert"]), ("back", H["back"]),
-                                                 ("up after", H["up after"])], sparse=False)
-                    if full is None:
-                        full, _w = self.chain(q_up, [("turn", make_T(T_ac[:3, :3], T_up[:3, 3])), ("carry", T_ac), ("above", H["above"]),
-                                                     ("insert", H["insert"]), ("back", H["back"]), ("up after", H["up after"])], sparse=False)
-                    if full is None:
-                        break  # this heading cannot be followed: letting go higher does not help
-                    if world.ok(full[-3][1][-1], plug=False) and world.ok(full[-1][1][-1], plug=False):
-                        out[h] = dy
-                        break
-                if h in out:
+            # the heading taught for the hole first (it usually works: one try instead of a sweep)
+            heads = ([prefer[h]] if prefer and h in prefer else []) + [d for d in HEADINGS if not (prefer and prefer.get(h) == d)]
+            for dy in heads:
+                if self._hole_ok(q_up, T_up, h, dy, below, world):
+                    out[h] = dy
                     break
         return out
 
     def to_dict(self) -> dict:
         return {"layout": self.layout(), "yaw": self.yaw, "hole_order": self.hole_order,
-                "cells": {k: {"yaw": v["yaw"], "q": np.asarray(v["q"]).tolist(), "note": v.get("note", ""), "cap": v.get("cap", 0.035)}
-                          for k, v in self.cell_prog.items()},
+                "cells": {k: {"yaw": v["yaw"], "q": np.asarray(v["q"]).tolist(), "note": v.get("note", ""), "cap": v.get("cap", 0.035),
+                              "observe": v.get("observe", "near"),
+                              "observe_q": None if v.get("observe_q") is None else np.asarray(v["observe_q"]).tolist(),
+                              "observe_desc": v.get("observe_desc", "")} for k, v in self.cell_prog.items()},
                 "configs": [{"q_ref": c["q_ref"].tolist(), "ref_T": np.asarray(c["ref_T"]).tolist(), "ref": c["ref"],
                              "posture": float(c["posture"]), "cells": c["cells"],
                              "hole_heading": {str(k): v for k, v in c["hole_heading"].items()}} for c in self.configs]}
@@ -319,8 +322,10 @@ class Program:
         self.yaw = float(d["yaw"])
         self.R, self.a = flat_R(self.yaw)
         self.hole_order = [int(h) for h in d.get("hole_order", self.hole_order)]
-        self.cell_prog = {k: {"yaw": float(v["yaw"]), "q": np.array(v["q"]), "note": v.get("note", ""), "cap": float(v.get("cap", 0.035))}
-                          for k, v in d.get("cells", {}).items()}
+        self.cell_prog = {k: {"yaw": float(v["yaw"]), "q": np.array(v["q"]), "note": v.get("note", ""), "cap": float(v.get("cap", 0.035)),
+                              "observe": v.get("observe", "near"),
+                              "observe_q": None if v.get("observe_q") is None else np.array(v["observe_q"]),
+                              "observe_desc": v.get("observe_desc", "")} for k, v in d.get("cells", {}).items()}
         self.configs = [{"q_ref": np.array(c["q_ref"]), "ref_T": np.array(c["ref_T"]), "ref": c["ref"], "posture": c["posture"],
                          "cells": list(c["cells"]), "hole_heading": {int(k): float(v) for k, v in c["hole_heading"].items()}}
                         for c in d.get("configs", [])]

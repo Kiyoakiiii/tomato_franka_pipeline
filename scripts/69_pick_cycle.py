@@ -37,6 +37,8 @@ def main() -> int:
                     "plant's observation pose; the tray and disc are located once per run)")
     ap.add_argument("--program", action="store_true", help="the plan steps from the taught program (76 grasp / place: the "
                     "template moved to this cell and hole, no search); needs --place HOLE")
+    ap.add_argument("--no-observe", action="store_true", help="no close-up (the program has no observation pose for this "
+                    "plant): grasped at the estimated height")
     ap.add_argument("--max-replans", type=int, default=2, help="grasp planned again (another pose) this often when no placement is found from it")
     ap.add_argument("--hold-s", type=float, default=0.5, help="pause at the top of the lift (2 s until 2026-11-02)")
     ap.add_argument("--place", type=int, nargs="?", const=0, default=None, metavar="HOLE",
@@ -56,16 +58,18 @@ def main() -> int:
              ("approach", ["scripts/65_side_grasp.py", "approach", *c]),
              ("close", ["scripts/66_gripper.py", "close"]),
              ("lift", ["scripts/65_side_grasp.py", "lift", *c])]
+    if args.no_observe:
+        steps = steps[1:]
     if args.program:
         if not args.place:
             print("--program needs --place HOLE")
             return 1
-        steps[1] = ("plan", ["scripts/76_program.py", "grasp", *c, "--hole", str(args.place)])
+        steps[[n for n, _ in steps].index("plan")] = ("plan", ["scripts/76_program.py", "grasp", *c, "--hole", str(args.place)])
         args.max_replans = 0
     if args.place is not None:
         h = [] if args.place == 0 else ["--hole", str(args.place)]
         # the place plan right after the grasp plan: refuse before touching the plant if the hole is out of reach
-        steps.insert(2, ("plan the placement", ["scripts/76_program.py", "place", *c, *h, "--other-holes"] if args.program
+        steps.insert([n for n, _ in steps].index("plan") + 1, ("plan the placement", ["scripts/76_program.py", "place", *c, *h, "--other-holes"] if args.program
                          else ["scripts/71_place_in_disc.py", "plan", *c, *h]))
         steps += [("carry to the disc", ["scripts/71_place_in_disc.py", "carry", *c]),
                   ("insert into the hole", ["scripts/71_place_in_disc.py", "insert", *c]),
@@ -81,12 +85,21 @@ def main() -> int:
     gdir = PROJECT_DIR / "experiments" / "grasp"
     npf = gdir / f"{args.cell}_no_place.json"  # kept from the selection (72 clears it when it plans this plant)
     replans = 0
+    import os
+
+    sim = bool(os.environ.get("SEEDLING_SIM_STATE"))  # the whole-run simulation: no gripper (its scripts not run)
+    t_steps = {}
     for i, (name, cmd) in enumerate(steps, 1):
         if stop.exists():
             print(f"STOPPED before step {i} ({name}) on request")
             return 2
         print(f">>> step {i}/{len(steps)}: {name}", flush=True)
+        if sim and cmd[0] == "scripts/66_gripper.py":
+            print("(simulated: no gripper)")
+            continue
+        t_s = time.time()
         r = subprocess.run([py, "-u", *cmd], cwd=PROJECT_DIR)
+        t_steps[name] = round(time.time() - t_s, 2)
         while r.returncode != 0 and name == "plan the placement" and replans < args.max_replans:
             # no placement from this grasp pose (the hand stays flat while carrying: the grasp's joint configuration
             # decides): another grasp pose (65 leaves out the ones in {cell}_no_place.json), then the placement again
@@ -95,7 +108,7 @@ def main() -> int:
             avoid.append(json.loads((gdir / f"{args.cell}_side_plan.json").read_text())["q"]["grasp"])
             npf.write_text(json.dumps(avoid))
             print(f">>> no placement from this grasp: the grasp planned again without it ({replans}/{args.max_replans})", flush=True)
-            if subprocess.run([py, "-u", *steps[1][1]], cwd=PROJECT_DIR).returncode != 0:
+            if subprocess.run([py, "-u", *dict(steps)["plan"]], cwd=PROJECT_DIR).returncode != 0:
                 break
             r = subprocess.run([py, "-u", *cmd], cwd=PROJECT_DIR)
         if r.returncode != 0:
@@ -105,6 +118,8 @@ def main() -> int:
         if name == "lift" and args.hold_s > 0:
             time.sleep(args.hold_s)
     print("CYCLE DONE", flush=True)
+    if sim:
+        print("STEP TIMES " + json.dumps(t_steps), flush=True)
     return 0
 
 

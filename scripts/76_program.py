@@ -133,9 +133,8 @@ def main() -> int:
             ok = prog.teach(plants, world_disc(), lambda filled: world_disc(filled, stems=True), holes=free)
             prog.cell_prog = {}
         if not ok:
-            if PROG_SAVE:
-                save_program({**prog.to_dict(), "approach_deg": args.approach_deg, "building": False})
-            return 1
+            print("  (each plant then tries its own arm configuration)")
+            prog.configs = []
         no_way = {}
 
         def save(building=True):
@@ -160,6 +159,7 @@ def main() -> int:
         save()
         if True:
             done, left_holes = [], list(holes)
+            quick_mode = [False]  # set when a plant that can be grasped finds no hole left
             for k in plants:
                 if not left_holes:
                     break
@@ -190,6 +190,27 @@ def main() -> int:
                 grasped = [False]  # some variant grasps it (then failing means no hole left that a flat hand reaches)
                 placed_any = [False]  # ... and some variant places it (then it failed on its observation pose / turn)
 
+                fallback = [None]  # the best program found that is not both observed and robust: (score, found)
+                t_k = time.time()
+                deadline = [t_k + 20.0]
+
+                def robust(variant, ci, q_obs, h):
+                    """does the program still work as the cycle will plan it after the close-up: the closing point 17 mm
+                    above a soil surface measured 10 mm higher or 5 mm lower than the overview's (the close-up read 8-13
+                    mm higher on 2026-11-05), into this hole or another one left"""
+                    from seedling.program import HEIGHT_SURE
+
+                    for dz in (0.010, -0.005):
+                        si_c = {"soil": si_k["soil"] + dz, "src": "test", "sure": True, "height": HEIGHT_SURE}
+                        _r, hole_c, _s = grasp_for_place(prog, k, cfg, grid, disc, q_obs, [p for p in planted if p not in done],
+                                                         world_disc, check_pieces, si_c, args, [h] + [x for x in left_holes if x != h],
+                                                         [p for p in planted if p not in done + [k]],
+                                                         extra_taken=[x for x in holes if x not in left_holes], variant=variant, ci=ci,
+                                                         stems=stems, turn_search=False)
+                        if hole_c is None:
+                            return False
+                    return True
+
                 def try_variant(variant, ci=0, note=""):
                     r = grasp_plan(prog, k, cfg, grid, disc, None, [p for p in planted if p not in done], world_disc, check_pieces,
                                    si_k, args, write=False, ci=ci, variant=variant, stems=stems)
@@ -203,28 +224,41 @@ def main() -> int:
                     grasped[0] = True
                     taken_b = [x for x in holes if x not in left_holes]
                     below_k = float(r["close_point"][2] - r["soil_z"] + PLUG)
-                    hh = prog.quick_holes(np.array(r["q"]["lift"]), below_k, world_disc(taken_b, stems=True), left_holes)
+                    hh = prog.quick_holes(np.array(r["q"]["lift"]), below_k, world_disc(taken_b, stems=True), left_holes,
+                                          prefer=prog.configs[ci]["hole_heading"] if prog.configs else None)
                     pl = "no hole a flat hand reaches from this grasp"
                     for h in left_holes:
                         if h not in hh:
                             continue
                         pl = place_plan(prog, k, h, r, [p for p in planted if p not in done + [k]], world_disc, check_pieces,
-                                        extra_taken=taken_b, write=False, prefer=hh[h])
-                        if not isinstance(pl, str):
-                            placed_any[0] = True
-                            # a complete program: also an observation pose near its stage, and the standard turn from
-                            # there (straight up, one joint move high up, straight down; no path search)
-                            pl_o = observe_pose(cfg, grid, k, T_FC, prog.tray_top, q_from=np.array(r["q"]["stage"]))
-                            if not pl_o.ok:
-                                pl = "no observation pose near its stage (the wrist would turn over)"
-                                continue
-                            r2 = grasp_plan(prog, k, cfg, grid, disc, pl_o.q, [p for p in planted if p not in done], world_disc,
-                                            check_pieces, si_k, args, write=False, ci=ci, variant=variant, stems=stems,
-                                            turn_search=False)
-                            if isinstance(r2, str):
-                                pl = f"from its observation pose: {r2}"
-                                continue
-                            return (h, r, note)
+                                        extra_taken=taken_b, write=False, prefer=hh[h], only_prefer=True)
+                        if isinstance(pl, str):
+                            continue
+                        placed_any[0] = True
+                        # how it is looked at close up: from a pose near its stage (the turn after it small), else from
+                        # the one chosen as from the overview; each with the standard turn to the stage (straight up, one
+                        # joint move high up, straight down). Neither: no close-up (grasped at the estimated height)
+                        v_ = dict(variant or {"yaw": prog.yaw, "q": np.array(r["q"]["grasp"]), "cap": 0.035})
+                        mode, q_obs = "none", None
+                        for q_from, m_ in ((np.array(r["q"]["stage"]), "near"), (None, "overview")):
+                            pl_o = observe_pose(cfg, grid, k, T_FC, prog.tray_top, q_from=q_from)
+                            if pl_o.ok and not isinstance(grasp_plan(prog, k, cfg, grid, disc, pl_o.q, [p for p in planted if p not in done],
+                                                                     world_disc, check_pieces, si_k, args, write=False, ci=ci,
+                                                                     variant=variant, stems=stems, turn_search=False), str):
+                                mode, q_obs = m_, pl_o.q
+                                break
+                        v_["observe"] = mode
+                        v_["observe_q"] = None if q_obs is None else np.asarray(q_obs)
+                        v_["observe_desc"] = pl_o.desc if q_obs is not None else ""
+                        rob = robust(variant, ci, q_obs, h) if mode != "none" else True
+                        note_ = note + ("" if mode != "none" else ", no close-up") + ("" if rob else ", NOT checked robust")
+                        if mode != "none" and rob:
+                            return (h, r, note_, v_)
+                        score = (rob, mode != "none")
+                        if fallback[0] is None or score > fallback[0][0]:
+                            fallback[0] = (score, (h, r, note_, v_))
+                            deadline[0] = min(deadline[0], time.time() + 6.0)  # a usable one: at most 6 s more for a better one
+                        pl = "its program is not observed and robust"
                     why_k.append(f"{note}: {pl}")
                     return None
 
@@ -232,37 +266,43 @@ def main() -> int:
                     found = try_variant(None, ci, f"default template, configuration {ci + 1}")
                     if found:
                         break
-                t_k = time.time()
-                for cap in (0.035, 0.050):  # grasped at most 35 mm above the soil, then (deep in the tray) 50
-                    if found or time.time() - t_k > 15.0:
-                        break
-                    for off in variant_offsets(prog, k, stems):
-                        if time.time() - t_k > 15.0:
-                            why_k.append("15 s of variants tried")
-                            break
+                # the variants: the approach turned (best first), at each the grasp at most 35 mm above the soil, then
+                # (deep in the tray, the wrist behind the hand over the tray) 50; the taught configurations, then the
+                # plant's own. At most 20 s per plant
+                if not found:
+                    for off in variant_offsets(prog, k, stems)[:3 if quick_mode[0] else 6]:
                         yaw = prog.yaw + np.radians(off)
-                        P = prog.cell_poses(k, si_k["soil"] + si_k["height"], yaw)
-                        seeds = [c_["q_ref"] for c_ in prog.configs] + own_solutions(prog, P, world_disc())
-                        for si_, q0 in enumerate(seeds):
-                            found = try_variant({"yaw": yaw, "q": q0, "cap": cap}, 0, f"approach {off:+.0f} deg from the program's, "
-                                                f"{'configuration ' + str(si_ + 1) if si_ < len(prog.configs) else 'its own arm configuration'}"
-                                                + (f", grasped up to {cap * 1000:.0f} mm above the soil" if cap > 0.035 else ""))
-                            if found:
+                        for cap in ((0.050,) if quick_mode[0] else (0.035, 0.050)):
+                            if found or time.time() > deadline[0]:
                                 break
-                        if found:
+                            P = prog.cell_poses(k, si_k["soil"] + si_k["height"], yaw)
+                            seeds = [c_["q_ref"] for c_ in prog.configs] + ([] if quick_mode[0] and prog.configs else own_solutions(prog, P, world_disc()))
+                            for si_, q0 in enumerate(seeds):
+                                if time.time() > deadline[0]:
+                                    why_k.append("the time for variants used up")
+                                    break
+                                found = try_variant({"yaw": yaw, "q": q0, "cap": cap}, 0, f"approach {off:+.0f} deg from the program's, "
+                                                    f"{'configuration ' + str(si_ + 1) if si_ < len(prog.configs) else 'its own arm configuration'}"
+                                                    + (f", grasped up to {cap * 1000:.0f} mm above the soil" if cap > 0.035 else ""))
+                                if found:
+                                    break
+                        if found or time.time() > deadline[0]:
                             break
+                if not found and fallback[0] is not None:
+                    found = fallback[0][1]
                 if not found:
                     no_way[k] = list(left_holes)
                     save()
                     print(f"  {k}: no way found ({'; '.join(why_k[:2] + ['...'] + why_k[-2:] if len(why_k) > 4 else why_k)})")
                     if grasped[0] and not placed_any[0]:
-                        print(f"  the free holes left ({', '.join(f'H{h}' for h in left_holes)}) are not reached by a flat hand from "
-                              f"{k}'s grasps: the disc counts as full for this job")
-                        break
+                        # grasped, but no hole left takes it: the next plants are tried in the quick way only (the taught
+                        # configurations, deep grasps), since the holes left may be out of reach of a flat hand
+                        quick_mode[0] = True
                     continue
-                h, r, note = found
+                h, r, note, v_ = found
                 prog.cell_prog[k] = {"yaw": float(r["yaw"]), "q": np.array(r["q"]["grasp"]), "note": note,
-                                     "cap": 0.050 if "50 mm" in note else 0.035}
+                                     "cap": float(v_.get("cap", 0.035)), "observe": v_.get("observe", "near"),
+                                     "observe_q": v_.get("observe_q"), "observe_desc": v_.get("observe_desc", "")}
                 print(f"  {k} -> H{h}: {note}", flush=True)
                 done.append(k)
                 left_holes.remove(h)
@@ -279,17 +319,26 @@ def main() -> int:
             return 1
         robot_q = None
         obs_from = None
-        if args.from_observe:
+        if args.from_observe and variant.get("observe") == "none":
+            robot_q = None  # no close-up for this plant (its program has no observation pose with a standard turn)
+        elif args.from_observe:
             # the observation pose nearest (in joints) to where the hand goes next, the stage of this cell's program: the
             # turn after looking is then small (chosen as from the overview, it needed the wrist turned over and swept
             # the fingers through the plant, 2026-11-05)
-            r0 = grasp_plan(prog, args.cell, cfg, grid, disc, None, planted, world_disc, check_pieces,
-                            soil_info(grid, args.cell, None, prog.tray_top), args, variant=variant,
-                            stems=[k for k in occupied if k != args.cell])
-            q_near = np.array(r0["q"]["stage"]) if isinstance(r0, dict) else np.array(cfg["tray"]["overview_q"], float)
-            pl = observe_pose(cfg, grid, args.cell, T_FC, prog.tray_top, q_from=q_near)
-            if not pl.ok:
-                pl = observe_pose(cfg, grid, args.cell, T_FC, prog.tray_top)
+            if variant.get("observe_q") is not None:
+                # worked out with the cell's program (76 build): used as it is
+                from types import SimpleNamespace
+
+                pl = SimpleNamespace(ok=True, q=np.asarray(variant["observe_q"], float), desc=variant.get("observe_desc", "") + " (the program's)")
+            else:
+                r0 = grasp_plan(prog, args.cell, cfg, grid, disc, None, planted, world_disc, check_pieces,
+                                soil_info(grid, args.cell, None, prog.tray_top), args, variant=variant,
+                                stems=[k for k in occupied if k != args.cell])
+                q_near = np.array(r0["q"]["stage"]) if isinstance(r0, dict) else np.array(cfg["tray"]["overview_q"], float)
+                # as the program chose it: near its stage, or as from the overview
+                pl = observe_pose(cfg, grid, args.cell, T_FC, prog.tray_top, q_from=q_near if variant.get("observe", "near") == "near" else None)
+                if not pl.ok:
+                    pl = observe_pose(cfg, grid, args.cell, T_FC, prog.tray_top)
             if not pl.ok:
                 print("no safe observation pose:", pl.tried[-3:])
                 return 1
@@ -307,8 +356,21 @@ def main() -> int:
         if obs is not None:
             obs["soil_used"] = si["soil"]
             obs_file.write_text(json.dumps(obs, indent=1))
+        ff = finger_floor_fn(cfg, args, si, obs, T_FC)
+        if not args.from_observe:
+            # in the cycle (after the close-up): the lowest closing height from which it can also be let go into its hole
+            # or another free one (the place step then finds it)
+            holes_g = ([args.hole] if args.hole in free else []) + [h for h in prog.hole_order if h in free and h != args.hole]
+            _r, hole_g, si_g = grasp_for_place(prog, args.cell, cfg, grid, disc, robot_q, planted, world_disc, check_pieces, si, args,
+                                               holes_g, [k for k in planted if k != args.cell], variant=variant,
+                                               stems=[k for k in occupied if k != args.cell])
+            if hole_g is not None:
+                if si_g["height"] > si["height"] + 1e-9:
+                    print(f"closing {si_g['height'] * 1000:.0f} mm above the soil (not {si['height'] * 1000:.0f}): from lower the "
+                          f"plant could not be let go into a hole")
+                si = si_g
         r = grasp_plan(prog, args.cell, cfg, grid, disc, robot_q, planted, world_disc, check_pieces, si, args,
-                       write=True, obs_from=obs_from, finger_floor=finger_floor_fn(cfg, args, si, obs, T_FC), variant=variant,
+                       write=True, obs_from=obs_from, finger_floor=ff, variant=variant,
                        stems=[k for k in occupied if k != args.cell])
         if isinstance(r, str):
             print(f"{args.cell}: no grasp in the program ({r})")
@@ -431,7 +493,7 @@ def observe_pose(cfg, grid, cell, T_FC, tray_top, q_from=None):
     c = np.array(grid["cells"][cell], float)
     guess = (grid.get("soil_z_overview") or {}).get(cell) or tray_top + 0.013
     c2 = copy.deepcopy(cfg)
-    c2["tray"]["observe"].update(distance_m=0.34, elevation_deg=[65, 55, 70, 75, 80], azimuth_offsets_deg=[0, -20, 20, -40, 40],
+    c2["tray"]["observe"].update(distance_m=0.34, elevation_deg=[65, 55, 75], azimuth_offsets_deg=[0, -20, 20, -40, 40],
                                  min_clearance_m=0.15, all_elevations=True, elevation_penalty_deg=2.0)
     q0 = np.array(cfg["tray"]["overview_q"], float) if q_from is None else np.asarray(q_from, float)
     return plan_observation(np.array([c[0], c[1], guess]), q0, T_FC, guess + 0.15, c2)
@@ -560,7 +622,39 @@ def grasp_plan(prog, cell, cfg, grid, disc, q_start, planted, world_disc, check_
     return plan
 
 
-def place_plan(prog, cell, hole, gp, left, world_disc, check_pieces, extra_taken=(), write=False, prefer=None):
+def grasp_for_place(prog, cell, cfg, grid, disc, q_start, planted, world_disc, check_pieces, si, args, holes, left_after,
+                    extra_taken=(), variant=None, ci=0, stems=None, turn_search=True, step=0.006):
+    """the grasp at the lowest closing height (from si's height, 17 mm over a soil measured close up, up to the program's
+    cap, 35 mm or 50 mm deep in the tray, in 6 mm steps) from which the plant can also be let go into one of holes (in
+    order): (plan, hole, si used) or (why, None, None). Gripped lower, the plug hangs less far below the hand, which then
+    has to go lower to let it go, where the arm can come too close to the table (2026-11-05: the programs made at 35 mm
+    failed at 17 mm for every hole)"""
+    from seedling.program import PLUG
+
+    cap = max(si["height"], float((variant or {}).get("cap", 0.035)))
+    last = "no closing height"
+    taught = {}
+    for c_ in prog.configs:
+        for k_, v_ in c_["hole_heading"].items():
+            taught.setdefault(k_, v_)
+    for h in sorted({si["height"], (si["height"] + cap) / 2, cap}):  # the lowest, the middle, the highest
+        si_h = dict(si, height=h)
+        r = grasp_plan(prog, cell, cfg, grid, disc, q_start, planted, world_disc, check_pieces, si_h, args, write=False, ci=ci,
+                       variant=variant, stems=stems, turn_search=turn_search)
+        if isinstance(r, str):
+            last = r
+        else:
+            below = float(r["close_point"][2] - r["soil_z"] + PLUG)
+            hh = prog.quick_holes(np.array(r["q"]["lift"]), below, world_disc(list(extra_taken), stems=True), list(holes), prefer=taught)
+            last = f"no hole from a grasp {h * 1000:.0f} mm above the soil"
+            for hole in holes:
+                if hole in hh and not isinstance(place_plan(prog, cell, hole, r, left_after, world_disc, check_pieces,
+                                                            extra_taken=extra_taken, prefer=hh[hole], only_prefer=True), str):
+                    return r, hole, si_h
+    return last, None, None
+
+
+def place_plan(prog, cell, hole, gp, left, world_disc, check_pieces, extra_taken=(), write=False, prefer=None, only_prefer=False):
     """the template from this grasp into this hole: the plan dict (71's format), or why not (str)"""
     from seedling.program import HEADINGS, MAX_TILT, PLUG
 
@@ -583,7 +677,7 @@ def place_plan(prog, cell, hole, gp, left, world_disc, check_pieces, extra_taken
     q_up = up[0][1][-1]
     taught = prog.configs[int(gp.get("config", 0))]["hole_heading"] if prog.configs else {}
     first = [prefer] if prefer is not None else ([taught[hole]] if hole in taught else [])
-    heads = first + [h for h in HEADINGS if h not in first]
+    heads = first if (only_prefer and first) else first + [h for h in HEADINGS if h not in first]
     last = "no heading"
     for dy in heads:
         for raise_m in (0.0, 0.01, 0.02, 0.03):

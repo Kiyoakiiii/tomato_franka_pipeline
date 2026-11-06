@@ -9,7 +9,6 @@ arm model, put the forearm onto the disc. Here the shape of the motion is fixed;
 from __future__ import annotations
 
 import numpy as np
-from scipy.spatial.transform import Rotation, Slerp
 
 from . import kinematics
 from .transforms import inv_T, make_T
@@ -18,10 +17,10 @@ from .transforms import inv_T, make_T
 def interpolate(Ta: np.ndarray, Tb: np.ndarray, step_m: float = 0.02, step_rad: float = np.radians(3.0)) -> list[np.ndarray]:
     """Poses from Ta to Tb (Tb included, Ta not): position on the straight line, attitude by slerp"""
     d = float(np.linalg.norm(Tb[:3, 3] - Ta[:3, 3]))
-    ang = float(np.linalg.norm(Rotation.from_matrix(Tb[:3, :3] @ Ta[:3, :3].T).as_rotvec()))
+    rv = kinematics._rotvec(Tb[:3, :3] @ Ta[:3, :3].T)  # slerp: the relative rotation's vector scaled (no scipy: fast)
+    ang = float(np.linalg.norm(rv))
     n = max(1, int(np.ceil(max(d / step_m, ang / step_rad))))
-    sl = Slerp([0.0, 1.0], Rotation.from_matrix(np.stack([Ta[:3, :3], Tb[:3, :3]])))
-    return [make_T(sl([t]).as_matrix()[0], Ta[:3, 3] + t * (Tb[:3, 3] - Ta[:3, 3])) for t in np.linspace(0, 1, n + 1)[1:]]
+    return [make_T(kinematics._exp(rv * t) @ Ta[:3, :3], Ta[:3, 3] + t * (Tb[:3, 3] - Ta[:3, 3])) for t in np.linspace(0, 1, n + 1)[1:]]
 
 
 def follow(q0: np.ndarray, poses_G: list[np.ndarray], F: np.ndarray, G: np.ndarray, margin: float,
@@ -88,7 +87,7 @@ def sparsify(q0: np.ndarray, qs: list[np.ndarray], poses_G: list[np.ndarray], F:
 
 def chain(q0: np.ndarray, targets_G: list[tuple[str, np.ndarray]], F: np.ndarray, G: np.ndarray, margin: float,
           max_dev_m: float = 0.005, max_tilt: float | None = None, step_m: float = 0.02, step_rad: float = np.radians(3.0),
-          sparse: bool = True):
+          sparse: bool = True, max_jump_rad: float = np.radians(12.0)):
     """Straight pieces from the current contact pose through the named target poses. Returns
     [(name, dense joints, waypoints), ...] (each piece's dense joints for checking, its waypoints for executing), or
     (None, reason)."""
@@ -97,7 +96,7 @@ def chain(q0: np.ndarray, targets_G: list[tuple[str, np.ndarray]], F: np.ndarray
     pieces = []
     for name, Tt in targets_G:
         poses = interpolate(T, Tt, step_m, step_rad)
-        qs = follow(q, poses, F, G, margin)
+        qs = follow(q, poses, F, G, margin, max_jump_rad)
         if qs is None:
             return None, f"{name}: no continuous joint solution along the straight line"
         pieces.append((name, qs, sparsify(q, qs, poses, F, G, max_dev_m, max_tilt) if sparse else qs[-1:]))

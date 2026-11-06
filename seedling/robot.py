@@ -138,10 +138,91 @@ class PlanningOnlyRobot(RobotBase):
         pass
 
 
+STATE_ENV = "SEEDLING_SIM_STATE"
+
+
+class StateSimRobot(RobotBase):
+    """What FrankyRobot gives when SEEDLING_SIM_STATE names a JSON file (the whole-run simulation, scripts/80): the
+    joints live in that file, so the processes of a run (77 -> 69 -> 65 / 71 / 68) see one arm. Every joint move is
+    checked against the world model of the current tray and disc files (every 2 deg) and logged with its smallest
+    clearance; a move that goes more than 5 mm into something fails (as the real reflex would stop it)."""
+
+    def __init__(self, cfg: dict, step_mode: bool = False, confirm_fn=None):
+        import os
+
+        super().__init__(cfg, step_mode, confirm_fn)
+        self.path = os.environ[STATE_ENV]
+        self.cfg_ = cfg
+
+    def _load(self) -> dict:
+        import json
+
+        return json.load(open(self.path))
+
+    def q(self):
+        return np.array(self._load()["q"], float)
+
+    def T_BE(self):
+        return kinematics.fk(self.q(), self.F_T_EE)
+
+    def external_force(self):
+        return np.zeros(3)
+
+    def has_errors(self) -> bool:
+        return False
+
+    def recover(self) -> bool:
+        return True
+
+    def move_joints(self, q, dynamics=None, description="joint move") -> MotionResult:
+        import json
+        import os
+
+        from .calibration import load_T_FC
+        from .config import PROJECT_DIR
+        from .world import World
+
+        q = np.asarray(q, float).reshape(7)
+        st = self._load()
+        qa = np.array(st["q"], float)
+        grid = json.loads((PROJECT_DIR / self.cfg_["tray"]["grid_file"]).read_text())
+        df = PROJECT_DIR / "calibration" / "disc.json"
+        disc = json.loads(df.read_text()) if df.exists() else None
+        T_FC, _ = load_T_FC(self.cfg_)
+        # at the plant the fingers and the plants are meant to touch: only rigid things and the arm itself are checked
+        m, where = World(self.cfg_, T_FC, grid, disc).worst(qa, q, fingers=False, plants=False, plug=False)
+        rec = {"description": description, "from": qa.tolist(), "to": q.tolist(), "margin_mm": round(m * 1000, 1), "where": where,
+               "max_joint_deg": round(float(np.degrees(np.abs(q - qa)).max()), 1)}
+        st.setdefault("log", []).append(rec)
+        if m < -0.005:
+            st["log"][-1]["failed"] = True
+            json.dump(st, open(self.path, "w"))
+            return MotionResult(False, f"simulated collision: {where} {m * 1000:+.0f} mm (more than 5 mm into it)", True, 0.0)
+        st["q"] = q.tolist()
+        tmp = self.path + ".tmp"
+        json.dump(st, open(tmp, "w"))
+        os.replace(tmp, self.path)
+        return MotionResult(True)
+
+    def move_to_pose(self, T_BE, dynamics=None, force_limit_n=None, description="move") -> MotionResult:
+        qn = kinematics.solve_ik_near(np.asarray(T_BE), self.q(), self.F_T_EE)
+        if qn is None:
+            return MotionResult(False, "no IK", False, 0.0)
+        return self.move_joints(qn, dynamics, description)
+
+    def move_contact_to(self, T_BG, **kw) -> MotionResult:
+        return self.move_to_pose(np.asarray(T_BG) @ np.linalg.inv(self.T_EG), **kw)
+
+    def close(self) -> None:
+        pass
+
+
 class FrankyRobot(RobotBase):
     def __new__(cls, *a, **k):
         import os
 
+        if os.environ.get(STATE_ENV):
+            return StateSimRobot(*a, **k)
         if os.environ.get(SIM_ENV):
             return PlanningOnlyRobot(*a, **k)
         return super().__new__(cls)

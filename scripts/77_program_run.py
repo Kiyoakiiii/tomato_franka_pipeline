@@ -55,6 +55,9 @@ def main() -> int:
     qf.write_text(json.dumps({"q": cfg["tray"]["overview_q"]}))
     env_plan = dict(os.environ, SEEDLING_SIM_Q=str(qf))
 
+    if os.environ.get("SEEDLING_SIM_STATE"):
+        # the whole-run simulation (scripts/80): no camera, no robot; the tray and disc files as they are
+        return _run(args, cfg, gdir, stop, run, env_plan, sim=True)
     # the camera kept open for the run (63); its output into a file
     sock = PROJECT_DIR / ".tmp" / "camera.sock"
     cam_log_path = PROJECT_DIR / ".tmp" / "camera_server.log"
@@ -80,7 +83,7 @@ def main() -> int:
                 cam_srv.kill()
 
 
-def _run(args, cfg, gdir, stop, run, env_plan) -> int:
+def _run(args, cfg, gdir, stop, run, env_plan, sim=False) -> int:
     from seedling.order import plant_order
 
     def write_json(path, d):
@@ -94,7 +97,7 @@ def _run(args, cfg, gdir, stop, run, env_plan) -> int:
     if run(["scripts/68_goto_overview.py"])[0] != 0:
         print("cannot go to the overview pose: stopped")
         return 1
-    rc, out = run(["scripts/60_tray_locate.py"], quiet=True)
+    rc, out = run(["scripts/60_tray_locate.py"], quiet=True) if not sim else (0, "(simulated: the files as they are)")
     print("\n".join(ln[:200] for ln in out.splitlines() if ln.startswith(("grid", "disc", "overlay", "CORRECTED", "REJECTED")) or "cells with" in ln))
     disc = json.loads(df.read_text())
     if rc != 0 or not disc.get("ok") or disc.get("ok_last_picture") is False:
@@ -210,7 +213,9 @@ def _run(args, cfg, gdir, stop, run, env_plan) -> int:
 
                 ahead["thread"] = threading.Thread(target=plan_ahead, daemon=True)
                 ahead["thread"].start()
-            rc, _ = run(["scripts/69_pick_cycle.py", "--cell", k, "--lift-mm", "100", "--place", str(hole), "--no-return", "--program"])
+            no_obs = (program() or {}).get("cells", {}).get(k, {}).get("observe") == "none"
+            rc, _ = run(["scripts/69_pick_cycle.py", "--cell", k, "--lift-mm", "100", "--place", str(hole), "--no-return", "--program",
+                         *(["--no-observe"] if no_obs else [])])
             if rc == 3:
                 print(f"the cycle for {k} found no safe plan after the close-up (nothing touched): {k} left, on with the next")
                 failed.add(k)
@@ -243,7 +248,7 @@ def _run(args, cfg, gdir, stop, run, env_plan) -> int:
         if build.poll() is None:
             build.wait()
         print("the program:\n" + "\n".join(build_lines()))
-    if end_check and placed and not stop.exists():
+    if end_check and placed and not stop.exists() and not sim:
         print(">>> back to the overview, one picture to check", flush=True)
         if run(["scripts/68_goto_overview.py", "--after-place", placed[-1][0]])[0] == 0:
             rc, out = run(["scripts/60_tray_locate.py"], quiet=True)
