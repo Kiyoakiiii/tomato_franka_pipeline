@@ -125,8 +125,9 @@ class World:
             obs.append(("disc", "rigid", C.Cylinder(self.p["disc_radius_mm"] / 1000, dt - tz), _T(np.eye(3), [c[0], c[1], (dt + tz) / 2])))
             holes = disc.get("holes", [])
             if taken_holes is None:
-                free = set(disc.get("free_holes", range(1, len(holes) + 1)))
-                taken_holes = [i for i in range(1, len(holes) + 1) if i not in free]
+                from .disc import taken_holes as _taken
+
+                taken_holes = _taken(disc)
             hgt, r = self.p["placed_plant_height_mm"] / 1000, self.p["placed_plant_radius_mm"] / 1000
             for hno in taken_holes:
                 x, y = holes[hno - 1][:2]

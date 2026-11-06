@@ -231,3 +231,36 @@ def locate_disc(frame: Frame, T_BC: np.ndarray, area=(0.30, 0.95, -0.50, 0.50), 
             "hole_radius_mm": [round(hh["r"] * 1000, 1) for hh in good], "rim_rms_mm": [round(hh["rms_mm"], 1) for hh in good],
             "centre_residual_mm": [round(float(v) * 1000, 1) for v in rsd], "spacing_residual_deg": [round(float(v), 1) for v in dphase],
             "holes": all_h, "hole_bottom_z": round(z_top - g["hole_depth"], 4)}
+
+
+def taken_holes(disc: dict) -> list[int]:
+    """the holes with a plant in them: "occupied_holes" (a plant seen above it, or put there by us; 60 / 77 keep it)
+    when the file has it, else every hole not seen free. A hole that was not seen at all (out of view, hidden) is
+    neither free nor taken then: no placing into it, and no plant assumed there (2026-11-05: an unseen H4 under the
+    forearm's way blocked grasps for a plant that was not there)"""
+    n = len(disc.get("holes", []))
+    if "occupied_holes" in disc:
+        return [int(h) for h in disc["occupied_holes"]]
+    free = set(disc.get("free_holes", range(1, n + 1)))
+    return [h for h in range(1, n + 1) if h not in free]
+
+
+def occupied_from_view(disc: dict, points_B, prior: dict | None = None, r: float = 0.020, min_points: int = 30) -> list[int]:
+    """holes not seen free with a plant seen above them in this picture (3D points within r of the hole centre,
+    15-250 mm over the disc top), plus those occupied before when the disc has not moved (within 10 mm)"""
+    import numpy as np
+
+    P = np.asarray(points_B)
+    zt = float(disc["z_top"])
+    out = []
+    free = set(disc.get("free_holes", []))
+    for i, (hx, hy) in enumerate(disc["holes"], 1):
+        if i in free:
+            continue
+        m = (np.hypot(P[:, 0] - hx, P[:, 1] - hy) < r) & (P[:, 2] > zt + 0.015) & (P[:, 2] < zt + 0.25)
+        if int(m.sum()) >= min_points:
+            out.append(i)
+    if prior and "occupied_holes" in prior and prior.get("centre") is not None and \
+            np.hypot(*(np.subtract(prior["centre"][:2], disc["centre"][:2]))) < 0.010:
+        out += [h for h in prior["occupied_holes"] if h not in free and h not in out]
+    return sorted(out)

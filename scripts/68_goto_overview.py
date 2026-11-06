@@ -60,7 +60,13 @@ def main() -> int:
             if pf.exists() and json.loads(pf.read_text()).get("hole") in free:
                 free.remove(json.loads(pf.read_text())["hole"])
             plants = [k for k in plants if k != args.after_place]
-        taken = [h for h in range(1, len(disc["holes"]) + 1) if h not in free]
+        if args.free:
+            taken = [h for h in range(1, len(disc["holes"]) + 1) if h not in free]
+        else:
+            from seedling.disc import taken_holes
+
+            taken = sorted(set(taken_holes(disc)) | {h for h in range(1, len(disc["holes"]) + 1)
+                                                      if h not in free and h not in disc.get("free_holes", [])})
     world = World(cfg, T_FC, grid, disc, tray_plants=plants, taken_holes=taken)
 
     steps, msg = lift_then_plan(q0, q_ov, world, cfg, time_s=args.path_time_s)

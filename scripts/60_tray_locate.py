@@ -162,6 +162,16 @@ def main() -> int:
             c0 = uv.mean(0).astype(int)
             cv2.putText(img, f"H{i}", (int(c0[0]) - 12, int(c0[1]) + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
         cv2.imwrite(str(out / "cells.jpg"), img)
+        if d["ok"]:
+            # the holes with a plant in them: seen above the hole, or occupied before (the disc not moved); a hole seen
+            # neither free nor with a plant is unknown (not placed into, no plant assumed there)
+            from seedling.disc import occupied_from_view
+
+            okp = np.isfinite(frame.xyz).all(-1)
+            d["occupied_holes"] = occupied_from_view(d, apply_T(T_BC, frame.xyz[okp]), prev)
+            unknown = [i for i in range(1, len(d["holes"]) + 1) if i not in d["free_holes"] and i not in d["occupied_holes"]]
+            print(f"disc holes: free {d['free_holes']}, with a plant {d['occupied_holes']}"
+                  + (f", not seen (unknown: no plant assumed, not used) {unknown}" if unknown else ""))
         if d["ok"] and not args.no_save:
             dp.write_text(json.dumps({**d, "q": q.tolist()}, indent=1))
             print("saved", dp.relative_to(PROJECT_DIR))

@@ -220,6 +220,10 @@ def _run(args, cfg, gdir, stop, run, env_plan) -> int:
             if rc != 0:
                 print(f"the cycle for {k} stopped (exit {rc}): stopped here, the arm is where that step left it")
                 break
+            try:  # the hole it went into (76 place takes another free one when the close-up moved the grasp)
+                hole = int(json.loads((gdir / f"{k}_place_plan.json").read_text())["hole"])
+            except (OSError, ValueError, KeyError):
+                pass
             done += 1
             placed.append((k, hole))
             g_ = json.loads(gf.read_text())
@@ -229,6 +233,7 @@ def _run(args, cfg, gdir, stop, run, env_plan) -> int:
             write_json(gf, g_)
             d_ = json.loads(df.read_text())
             d_["free_holes"] = [h for h in d_.get("free_holes", []) if h != hole]
+            d_["occupied_holes"] = sorted(set(d_.get("occupied_holes", [])) | {hole})
             write_json(df, d_)
             print(f"{k} -> H{hole} done ({done}); straight on", flush=True)
     finally:

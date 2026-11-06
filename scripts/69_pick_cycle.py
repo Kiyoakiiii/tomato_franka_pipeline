@@ -65,7 +65,7 @@ def main() -> int:
     if args.place is not None:
         h = [] if args.place == 0 else ["--hole", str(args.place)]
         # the place plan right after the grasp plan: refuse before touching the plant if the hole is out of reach
-        steps.insert(2, ("plan the placement", ["scripts/76_program.py", "place", *c, *h] if args.program
+        steps.insert(2, ("plan the placement", ["scripts/76_program.py", "place", *c, *h, "--other-holes"] if args.program
                          else ["scripts/71_place_in_disc.py", "plan", *c, *h]))
         steps += [("carry to the disc", ["scripts/71_place_in_disc.py", "carry", *c]),
                   ("insert into the hole", ["scripts/71_place_in_disc.py", "insert", *c]),

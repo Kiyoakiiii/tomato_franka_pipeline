@@ -204,7 +204,8 @@ def main() -> int:
         if plan_file.exists():
             try:
                 old_ = json.loads(plan_file.read_text())
-                if ("observe_q" in old_ and float(np.degrees(np.abs(np.array(old_["observe_from"]) - q_ref)).max()) < 0.5
+                # (the program, 76, picks it near the cell's stage: any observation pose made for this cell is used)
+                if ("observe_q" in old_ and (old_.get("program") or float(np.degrees(np.abs(np.array(old_["observe_from"]) - q_ref)).max()) < 0.5)
                         and np.linalg.norm(np.array(old_["observe_cell_xyz"]) - np.array(grid["cells"][args.cell], float)) < 0.003):
                     from seedling.wrist import ObservationPlan, path_clearance
 
@@ -227,8 +228,9 @@ def main() -> int:
         from seedling.world import World
 
         disc_o = json.loads(disc_file.read_text()) if disc_file.exists() else None
-        taken_o = ([h for h in range(1, len(disc_o["holes"]) + 1) if h not in disc_o.get("free_holes", [])]
-                   if disc_o is not None and "holes" in disc_o else None)
+        from seedling.disc import taken_holes
+
+        taken_o = taken_holes(disc_o) if disc_o is not None and "holes" in disc_o else None
         w_o = World(cfg, T_FC, grid, disc_o, tray_plants=list(grid.get("planted") or grid.get("occupied", [])), taken_holes=taken_o)
         steps_o, msg_o = lift_then_plan(robot.q(), pl.q, w_o, cfg, time_s=6.0)
         if steps_o is None:
