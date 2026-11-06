@@ -198,6 +198,31 @@ def solve_ik(
     return None
 
 
+def _gn_pull(q, target, F_T_EE, rot_weight, q_prev, pull, lo, hi, iters: int = 60):
+    """argmin |residual(x)|^2 + pull^2 |x - q_prev|^2 for lo <= x <= hi, from q: Gauss-Newton with the joints that sit
+    on a limit and are pushed beyond it held there for the step (active set), steps <= 0.3 rad"""
+    x = np.clip(np.asarray(q, float), lo, hi)
+    P2 = pull * pull
+    eps = 1e-9
+    for _ in range(iters):
+        r = _residual(x, target, F_T_EE, rot_weight)
+        J = _jacobian(x, target, F_T_EE, rot_weight)
+        g = J.T @ r + P2 * (x - q_prev)
+        H = J.T @ J + (P2 + 1e-9) * np.eye(7)
+        free = ~(((x <= lo + eps) & (g > 0)) | ((x >= hi - eps) & (g < 0)))  # descent would leave the limit
+        dx = np.zeros(7)
+        if free.any():
+            dx[free] = -np.linalg.solve(H[np.ix_(free, free)], g[free])
+        s = float(np.abs(dx).max())
+        if s > 0.3:
+            dx *= 0.3 / s
+        xn = np.clip(x + dx, lo, hi)
+        if float(np.abs(xn - x).max()) < 1e-8:
+            return xn
+        x = xn
+    return x
+
+
 def solve_ik_near(
     target_T_BE: np.ndarray,
     q_start: np.ndarray,
@@ -211,8 +236,6 @@ def solve_ik_near(
     """IK that stays on the current branch: follow the straight Cartesian path from fk(q_start) to the target in
     small steps, each solved from the previous joints with a weak pull toward them (least joint change).
     Use this for the joint moves the robot actually executes; ``solve_ik`` may return a far-away solution."""
-    from scipy.optimize import least_squares
-
     lo, hi = Q_MIN + limit_margin_rad, Q_MAX - limit_margin_rad
     q = np.clip(np.asarray(q_start, dtype=float), lo, hi)
     T0 = fk(q, F_T_EE)
@@ -226,11 +249,10 @@ def solve_ik_near(
         Tk[:3, :3] = Rotation.from_rotvec(dR * k / steps).as_matrix() @ T0[:3, :3]
         Tk[:3, 3] = T0[:3, 3] + (target_T_BE[:3, 3] - T0[:3, 3]) * k / steps
         q_prev = q.copy()
-        # residual + weak pull towards the previous joints, bounded (trust region); the analytic Jacobian instead of
-        # scipy's finite differences (7 extra residuals per step: most of the planning time, 2026-11-04)
-        eye = pull * np.eye(7)
-        q = least_squares(lambda x: np.concatenate([_residual(x, Tk, F_T_EE, rot_weight), pull * (x - q_prev)]), q, bounds=(lo, hi),
-                          jac=lambda x: np.vstack([_jacobian(x, Tk, F_T_EE, rot_weight), eye])).x
+        # residual + weak pull towards the previous joints, within the limits: Gauss-Newton on the stacked residual
+        # (the pull keeps it well conditioned), steps clipped to the limits (scipy's least_squares did the same with
+        # ~1 ms of overhead per call: a quarter of the planning time, 2026-11-05)
+        q = _gn_pull(q, Tk, F_T_EE, rot_weight, q_prev, pull, lo, hi)
     r = _residual(q, target_T_BE, F_T_EE, rot_weight)
     if np.linalg.norm(r[:3]) <= pos_tol_m and np.degrees(np.linalg.norm(r[3:]) / rot_weight) <= rot_tol_deg:
         return q

@@ -78,7 +78,7 @@ def main() -> int:
     from seedling.robot import FrankyRobot
     from seedling.transforms import inv_T, make_T
     from seedling import cartesian
-    from seedling.planner import lift_then_plan, plan_path
+    from seedling.planner import lift_then_plan, segment_ok
     from seedling.world import World
 
     T_FC, _ = load_T_FC(cfg)
@@ -144,9 +144,12 @@ def main() -> int:
         free = [int(h) for h in args.free.split(",")] if args.free else disc.get("free_holes", list(range(1, len(holes) + 1)))
         # the plan made when this plant was chosen is used as it is when the grasp plan is still the same one (its lift
         # pose) and the hole is still free
+        prev_choice = None
         if place_file.exists() and not args.hole:
             try:
                 old_ = json.loads(place_file.read_text())
+                if old_.get("safe") and old_.get("hole") in free and "dyaw" in old_:
+                    prev_choice = (int(old_["hole"]) - 1, float(old_["dyaw"]), float(old_.get("release_raised_mm", 0.0)) / 1000)
                 if (old_.get("safe") and float(np.degrees(np.abs(np.array(old_["start"]) - q_lift)).max()) < 0.1
                         and old_.get("hole") in free and old_.get("below_mm") == round(below * 1000, 1)):
                     print(f"the place plan made when {args.cell} was chosen still holds (H{old_['hole']}): used as it is")
@@ -311,7 +314,9 @@ def main() -> int:
                         return (cartesian.tilt_deg(q_, F, G) <= args.max_tilt_deg
                                 and cartesian.posture_cost(q_, G_of(q_)[:2, 3]) <= band and w_carry.ok(q_))
 
-                    path = plan_path(q_up, q_ac, valid, time_s=1.0)  # the straight joint move at height first (plan_path does)
+                    # only the straight joint move (checked every 1.5 deg, the hand kept flat): a path search under the
+                    # flat-hand condition practically never succeeds and cost 1 s per candidate (2026-11-05: 25 s per plant)
+                    path = [q_ac] if valid(q_ac) and segment_ok(q_up, q_ac, valid) else None
                     if path is None:
                         why_.append(f"H{hi + 1}: no safe carry path to above the hole with the hand kept flat")
                         continue
@@ -342,7 +347,14 @@ def main() -> int:
 
         deadline = _t.time() + args.time_budget_s
         res = None
-        for hi in order:
+        if prev_choice is not None:
+            # the hole and heading chosen when the plant was chosen, from the grasp as it is now (planned again after
+            # the close-up): one try, ~1 s, before the full search (2026-11-05: 8-25 s per plant in the cycle)
+            plan_, lines = plan_hole(*prev_choice)
+            if plan_ is not None:
+                res = (prev_choice[0], prev_choice[1], prev_choice[2], plan_, lines)
+                print(f"the hole and heading chosen before (H{prev_choice[0] + 1}, {prev_choice[1]:+.0f} deg) work from this grasp too")
+        for hi in ([] if res else order):
             if _t.time() > deadline:
                 print(f"planning time used up (--time-budget-s {args.time_budget_s:.0f}) before H{hi + 1}")
                 break
@@ -392,7 +404,7 @@ def main() -> int:
                                    f"let go with it {args.insert_mm:.0f} mm in the hole"))
         enc = {k: ([w.tolist() for w in v] if isinstance(v, list) else v.tolist()) for k, v in plan_.items()}
         place_file.write_text(json.dumps({"cell": args.cell, "hole": hi + 1, "hole_xy": holes[hi].tolist(), "q": enc,
-                                          "start": q_lift.tolist(), "release_raised_mm": round(raised * 1000, 1),
+                                          "start": q_lift.tolist(), "release_raised_mm": round(raised * 1000, 1), "dyaw": float(dyaw),
                                           "below_mm": round(below * 1000, 1), "safe": True}, indent=1))
         print("place plan saved")
         return 0

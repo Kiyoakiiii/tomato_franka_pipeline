@@ -495,6 +495,53 @@ def main() -> int:
             except Exception:  # noqa: BLE001  (an old plan file: plan again)
                 pass
 
+        # can the plant be carried from this grasp to a free hole with the hand kept flat? The hand only turning about
+        # the vertical, the arm cannot change its joint configuration on the way: the grasp's decides (2026-11-05: C8's
+        # chosen grasps could not be placed, found only after ~20 s of placement planning each). The way of 71
+        # (straight up to the carry height, then straight moves to above the hole), joint continuity only, no
+        # obstacles: a quick filter, 71 decides
+        holes_ = np.array(disc_now["holes"]) if disc_now is not None and "holes" in disc_now else None
+        free_ = [h for h in disc_now.get("free_holes", [])] if holes_ is not None else []
+
+        good_ = []  # (hole, heading, route) that worked for an earlier candidate: tried first
+
+        def placeable(q_li, z_c):
+            """the way 71 carries it (straight up, straight moves of a flat hand to above a free hole, straight down
+            until the plug bottom is at the disc top) has a continuous joint solution and the release pose is clear"""
+            if holes_ is None or not free_:
+                return True
+            below = (z_c - soil_z) + 0.040  # plug bottom below the held stem (71: closing height above the soil + plug)
+            z_rel = float(disc_now["z_top"]) + below
+            T_li = G_of(q_li)
+            z_hi = max(float(T_li[2, 3]), tray_top + 0.15 + 0.075)
+            T_hi = T_li.copy()
+            T_hi[2, 3] = z_hi
+            pcs_, _w = cartesian.chain(q_li, [("up", T_hi)], F, G, margin, max_dev_m=0.03, max_tilt=5.0)
+            if pcs_ is None:
+                return False
+            q_u = pcs_[-1][1][-1]
+            combos = [(h_, dy, ri) for h_ in sorted(free_, key=lambda h_: -np.hypot(*holes_[h_ - 1][:2]))
+                      for dy in [0.0] + [s_ * d_ for d_ in (20, 40, 60, 80, 10, 30, 50, 70, 90) for s_ in (-1, 1)]  # as 71
+                      for ri in range(3)]
+            combos.sort(key=lambda t_: t_ not in good_)
+            for h_, dy, ri in combos:
+                hxy = holes_[h_ - 1][:2]
+                yw = np.arctan2(hxy[1], hxy[0]) + np.radians(dy)
+                a_ = np.array([np.cos(yw), np.sin(yw), 0.0])
+                ac_ = np.array([np.sin(yw), -np.cos(yw), 0.0])
+                R_ = np.column_stack([np.cross(ac_, a_), ac_, a_])
+                p_hi = np.array([hxy[0], hxy[1], z_hi]) - a_ * fwd
+                T_rel = make_T(R_, np.array([hxy[0], hxy[1], z_rel]) - a_ * fwd)
+                route = ([("carry", make_T(R_, p_hi))],
+                         [("turn", make_T(R_, T_hi[:3, 3])), ("carry", make_T(R_, p_hi))],
+                         [("carry", make_T(T_hi[:3, :3], p_hi)), ("turn", make_T(R_, p_hi))])[ri]
+                # joint continuity only (no waypoints worked out; coarser steps made false jumps, 2026-11-05)
+                pc_r, _w = cartesian.chain(q_u, route + [("down", T_rel)], F, G, margin, sparse=False)
+                if pc_r is not None and world.ok(pc_r[-1][1][-1], plug=False):
+                    good_.append((h_, dy, ri))
+                    return True
+            return False
+
         # the flattest pitch first (fingers parallel to the tray), every heading at it, then the next pitch: the first
         # fully safe plan wins. Only the chosen plan's moves are printed in full, the others as one line each
         chosen, raised, best = None, set(), None
@@ -524,8 +571,10 @@ def main() -> int:
         for pitch in pitches:
             pt = np.radians(pitch)
             for dyaw in args.headings_deg:
-                if (best is not None and (best[2] <= 15.0 or accept_first[0])) or _tt.time() > deadline:
-                    break  # a natural plan found (headings come straightest first), or the time is up
+                if (best is not None and (best[2] <= 15.0 or accept_first[0] or cost_[dyaw] >= best[0])) or _tt.time() > deadline:
+                    # a natural plan found, or none of the headings left can beat the best one (they come in order of
+                    # their own cost, which every plan's cost includes), or the time is up
+                    break
                 yaw = radial + np.radians(dyaw)
                 tag = f"pitch {pitch:g} deg, heading {dyaw:+.0f} deg"
                 hits = blocked(yaw, pitch)
@@ -583,7 +632,7 @@ def main() -> int:
                     print(f"  {tag}: no joint solution clear at the grasp itself" + (f" ({why_g[0][1]}: {why_g[0][0] * 1000:+.0f} mm)" if why_g else ""))
                 n_tried = 0
                 for pc0, q_gr in cands:
-                    if n_tried >= args.max_branches or (best is not None and pc0 >= best[0]) or _tt.time() > deadline:
+                    if n_tried >= args.max_branches or (best is not None and pc0 + cost_[dyaw] >= best[0]) or _tt.time() > deadline:
                         break
                     if no_place(q_gr):
                         print(f"  {tag}, posture {pc0:.0f} deg: the plant could not be placed from this one before")
@@ -607,6 +656,9 @@ def main() -> int:
                     if pc > max_posture:
                         over_limit[0] = min(over_limit[0], pc)
                         print(f"{lines[0][:-1]}: posture {pc:.0f} deg on the way in or out (limit {max_posture:.0f})")
+                        continue
+                    if not placeable(q_li, z_c):
+                        print(f"{lines[0][:-1]}: from this posture the hand cannot be carried flat to any free hole")
                         continue
                     # each executed piece (joint waypoints of the straight lines) checked
                     ok = True

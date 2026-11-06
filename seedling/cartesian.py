@@ -87,7 +87,8 @@ def sparsify(q0: np.ndarray, qs: list[np.ndarray], poses_G: list[np.ndarray], F:
 
 
 def chain(q0: np.ndarray, targets_G: list[tuple[str, np.ndarray]], F: np.ndarray, G: np.ndarray, margin: float,
-          max_dev_m: float = 0.005, max_tilt: float | None = None):
+          max_dev_m: float = 0.005, max_tilt: float | None = None, step_m: float = 0.02, step_rad: float = np.radians(3.0),
+          sparse: bool = True):
     """Straight pieces from the current contact pose through the named target poses. Returns
     [(name, dense joints, waypoints), ...] (each piece's dense joints for checking, its waypoints for executing), or
     (None, reason)."""
@@ -95,11 +96,11 @@ def chain(q0: np.ndarray, targets_G: list[tuple[str, np.ndarray]], F: np.ndarray
     q = np.asarray(q0, float)
     pieces = []
     for name, Tt in targets_G:
-        poses = interpolate(T, Tt)
+        poses = interpolate(T, Tt, step_m, step_rad)
         qs = follow(q, poses, F, G, margin)
         if qs is None:
             return None, f"{name}: no continuous joint solution along the straight line"
-        pieces.append((name, qs, sparsify(q, qs, poses, F, G, max_dev_m, max_tilt)))
+        pieces.append((name, qs, sparsify(q, qs, poses, F, G, max_dev_m, max_tilt) if sparse else qs[-1:]))
         q, T = qs[-1], Tt
     return pieces, ""
 

@@ -70,9 +70,7 @@ def main() -> int:
                   ("retreat", ["scripts/65_side_grasp.py", "retreat", *c]),
                   ("back to the overview", ["scripts/68_goto_overview.py"])]
     gdir = PROJECT_DIR / "experiments" / "grasp"
-    npf = gdir / f"{args.cell}_no_place.json"
-    if npf.exists():
-        npf.unlink()  # from an earlier cycle
+    npf = gdir / f"{args.cell}_no_place.json"  # kept from the selection (72 clears it when it plans this plant)
     replans = 0
     for i, (name, cmd) in enumerate(steps, 1):
         if stop.exists():

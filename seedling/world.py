@@ -131,6 +131,13 @@ class World:
                 obs.append((f"plant in H{hno}", "soft", C.Cylinder(r, hgt), _T(np.eye(3), [x, y, dt + hgt / 2])))
         self.obstacles = obs
         self._req = C.DistanceRequest()
+        # per obstacle, once: coal transform, centre, bounding radius, needed clearance, kind key
+        self._obs = [(name, kind, shp, C.Transform3s(T[:3, :3], T[:3, 3]), T[:3, 3].copy(), _radius(shp),
+                      (self.p["env_clearance_mm"] if kind == "rigid" else self.p["plant_clearance_mm"]) / 1000,
+                      "env" if kind == "rigid" else "plants") for name, kind, shp, T in obs]
+        self._oc = np.array([o[4] for o in self._obs]).reshape(-1, 3)
+        self._orad = np.array([o[5] + o[6] for o in self._obs])  # radius + needed clearance
+        self._att_r = [None if isinstance(shp, tuple) else _radius(shp) for _, shp, _ in self.attached]
 
     # ---- placement of the arm's shapes -------------------------------------------------------------------------
     def _place(self, q):
@@ -142,14 +149,14 @@ class World:
             M = self.data.oMi[j].homogeneous @ P
             shapes.append((f"link{i}", self.hulls[i], M[:3, :3], M[:3, 3], self.link_r[i]))
         T_BF = kinematics.fk_flange(q)
-        for name, shp, T in self.attached:
+        for (name, shp, T), r_ in zip(self.attached, self._att_r):
             Tw = T_BF @ T
             if isinstance(shp, tuple):  # the held plug: a cylinder from the stem down
                 depth = shp[1]
                 c = Tw[:3, 3] - np.array([0, 0, depth / 2])
                 shapes.append((name, self.coal.Cylinder(0.016, depth), np.eye(3), c, depth / 2 + 0.016))
             else:
-                shapes.append((name, shp, Tw[:3, :3], Tw[:3, 3], _radius(shp)))
+                shapes.append((name, shp, Tw[:3, :3], Tw[:3, 3], r_))
         return shapes
 
     def _dist(self, a, b):
@@ -161,38 +168,73 @@ class World:
         """smallest distance minus what it needs, per kind: 'env' (rigid obstacles), 'plants', 'self' (m; >= 0 fine),
         with the closest pair. fingers/plug False: the fingers / held plug are not checked against the obstacles
         (when they are meant to be at the plant or in the hole); ignore: obstacle names left out (the plant grasped)"""
-        p = self.p
+        return self._check(q, fingers, plug, plants, ignore, None)
+
+    def _check(self, q, fingers, plug, plants, ignore, stop_below):
+        """clearances (see clearances); with stop_below set, only whether every clearance is >= stop_below: pairs
+        whose bounding spheres already keep that are skipped, and it returns None at the first one below.
+        Exact minimum per kind by bounding-sphere lower bounds: the pairs in increasing order of their bound, until
+        the bound exceeds the smallest distance found (2026-11-05: the old loop computed ~60 exact distances per
+        pose, half the planning time)"""
+        C = self.coal
         S = self._place(q)
         out = {"env": (np.inf, ""), "plants": (np.inf, ""), "self": (np.inf, "")}
         movers = [s for s in S if s[0] not in ("link0", "link1") and (fingers or s[0] != "fingers") and (plug or s[0] != "held plug")]
-        for name, kind, shp, T in self.obstacles:
-            if name in ignore or (kind == "soft" and not plants):
-                continue
-            need = (p["env_clearance_mm"] if kind == "rigid" else p["plant_clearance_mm"]) / 1000
-            key = "env" if kind == "rigid" else "plants"
-            ob = (shp, T[:3, :3], T[:3, 3])
-            r_ob = _radius(shp)
-            for s in movers:
-                if name == "table" and s[0] in ("link2",):
+        tfs = {s[0]: C.Transform3s(s[2], s[3]) for s in S}
+        if len(self._obs):
+            mc = np.array([s[3] for s in movers])
+            mr = np.array([s[4] for s in movers])
+            diff = mc[:, None, :] - self._oc[None, :, :]
+            lb = np.sqrt((diff * diff).sum(-1)) - mr[:, None] - self._orad[None, :]  # lower bound of distance - need
+            for j, (name, kind, shp, tf, _c, _r, need, key) in enumerate(self._obs):
+                if name in ignore or (kind == "soft" and not plants):
+                    lb[:, j] = np.inf
+                elif name == "table":
+                    for i, s in enumerate(movers):
+                        if s[0] == "link2":
+                            lb[i, j] = np.inf
+            order = np.argsort(lb, axis=None)
+            res = C.DistanceResult()
+            for flat in order:
+                i, j = divmod(int(flat), lb.shape[1])
+                b = float(lb[i, j])
+                if not np.isfinite(b):
+                    break
+                name, kind, shp, tf, _c, _r, need, key = self._obs[j]
+                if stop_below is not None:
+                    if b >= stop_below:
+                        break
+                elif b >= max(out["env"][0], out["plants"][0]):
+                    break  # no pair left can come closer than the closest of either kind found so far
+                if stop_below is None and b >= out[key][0]:
                     continue
-                # cheap reject: bounding spheres more than 10 cm apart beyond what is needed (not the closest pair)
-                if np.linalg.norm(s[3] - T[:3, 3]) - s[4] - r_ob > need + 0.10:
-                    continue
-                d = self._dist(s, ob) - need
+                s = movers[i]
+                res.clear()  # a DistanceResult keeps the smallest distance of all queries made with it
+                d = C.distance(s[1], tfs[s[0]], shp, tf, self._req, res) - need
                 if d < out[key][0]:
                     out[key] = (d, f"{s[0]} - {name}")
+                    if stop_below is not None and d < stop_below:
+                        return None
         # self: the link pairs Franka's own description does not exclude (franka_arm.srdf: adjacent or 'Never' pairs are
         # left out), and the attached camera / gripper / plug against links 0-5 (the camera came within 69 mm of the
         # forearm's axis and Franka's reflex stopped the arm, 2026-11-02)
+        p = self.p
         by = {s_[0]: s_ for s_ in S}
         pairs = [(f"link{i}", f"link{j}") for i, j in ((0, 5), (0, 6), (0, 7), (1, 5), (1, 6), (1, 7), (2, 5), (2, 7))]
         pairs += [(a_, f"link{j}") for a_ in ("camera", "gripper", "fingers", "held plug") if a_ in by for j in range(6)]
         need = p["self_clearance_mm"] / 1000
-        for a_, b_ in pairs:
+        lbs = sorted((float(np.linalg.norm(by[a_][3] - by[b_][3])) - by[a_][4] - by[b_][4] - need, a_, b_) for a_, b_ in pairs)
+        res = C.DistanceResult()
+        for b, a_, b_ in lbs:
+            if (stop_below is not None and b >= stop_below) or (stop_below is None and b >= out["self"][0]):
+                break
             A, B = by[a_], by[b_]
-            d = self._dist(A, (B[1], B[2], B[3])) - need
+            res.clear()
+            d = C.distance(A[1], tfs[a_], B[1], tfs[b_], self._req, res) - need
             if d < out["self"][0]:
                 out["self"] = (d, f"{a_} - {b_}")
+                if stop_below is not None and d < stop_below:
+                    return None
         # the robot refuses any target whose contact point lies outside robot.workspace_m (seedling.robot._validate):
         # every pose of every path stays inside it (2026-11-04: a carry waypoint at y = -0.509 was refused)
         ws = self.cfg["robot"]["workspace_m"]
@@ -207,8 +249,9 @@ class World:
     def free_ok(self, q) -> bool:
         return self.ok(q)
 
-    def ok(self, q, **kw) -> bool:
-        return min(v[0] for v in self.clearances(q, **kw).values()) >= 0.0
+    def ok(self, q, *, fingers: bool = True, plug: bool = True, plants: bool = True, ignore=()) -> bool:
+        c = self._check(q, fingers, plug, plants, ignore, 0.0)
+        return c is not None and c["workspace"][0] >= 0.0
 
     def worst(self, qa, qb, step_deg: float = 2.0, **kw):
         """the smallest clearance (minus need) along the straight joint path, and where"""
