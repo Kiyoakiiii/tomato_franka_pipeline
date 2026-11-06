@@ -68,6 +68,9 @@ class Program:
         # the taught configurations: q_ref (a grasp's joints), ref_T, ref (cell), posture, cells (reached),
         # hole_heading (hole -> hand heading, deg from straight out at the hole)
         self.configs = []
+        # per cell, what the program does there (worked out once when it is built): the approach yaw and the grasp
+        # joints at the estimated height (the default template's, or the variant that reaches it)
+        self.cell_prog = {}
 
     # ---- the pieces ------------------------------------------------------------------------------------------------
     def G_of(self, q):
@@ -76,18 +79,40 @@ class Program:
     def chain(self, q0, targets, **kw):
         return cartesian.chain(q0, targets, self.F, self.G, self.margin, **kw)
 
-    def cell_poses(self, cell: str, z_close: float) -> dict:
+    def cell_poses(self, cell: str, z_close: float, yaw: float | None = None) -> dict:
+        """the template's hand poses at this cell, approaching along yaw (default: the program's direction)"""
+        R, a = flat_R(yaw) if yaw is not None else (self.R, self.a)
         c = self.grid["cells"][cell]
         close = np.array([c[0], c[1], z_close])
-        grasp = close - self.a * self.fwd  # the open gap centre: the fingers swing forward onto the closing point
-        pre = grasp - self.a * STANDOFF
-        return {"close": close, "grasp": make_T(self.R, grasp), "pre": make_T(self.R, pre),
-                "stage": make_T(self.R, pre + [0, 0, STAGE_UP]), "lift": make_T(self.R, grasp + [0, 0, LIFT])}
+        grasp = close - a * self.fwd  # the open gap centre: the fingers swing forward onto the closing point
+        pre = grasp - a * STANDOFF
+        return {"close": close, "R": R, "yaw": float(yaw if yaw is not None else self.yaw), "grasp": make_T(R, grasp),
+                "pre": make_T(R, pre), "stage": make_T(R, pre + [0, 0, STAGE_UP]), "lift": make_T(R, grasp + [0, 0, LIFT])}
 
-    def grasp_joints(self, T_grasp, ci: int = 0):
-        """the grasp in configuration ci of the job: a straight move of the hand from its taught grasp"""
-        pcs, why = self.chain(self.configs[ci]["q_ref"], [("to the cell", T_grasp)])
-        return (pcs[-1][1][-1], "") if pcs is not None else (None, f"not reachable in the arm configuration {ci + 1} ({why})")
+    def hand_clearance(self, cell: str, yaw: float, stems) -> float:
+        """how far the other plants' stems (cell centres) stay from what the open hand sweeps on its way in, in the
+        plane of the grasp: the open fingers (31 mm either side) from 15 mm past the stem to 75 mm behind it, the
+        gripper body (45 mm either side) behind that, the standoff added (as 65)"""
+        c = np.array(self.grid["cells"][cell][:2], float)
+        back = -np.array([np.cos(yaw), np.sin(yaw)])
+        lat_ax = np.array([-back[1], back[0]])
+        boxes = [(-0.015, 0.075, 0.031), (0.075, 0.18 + STANDOFF, 0.045)]
+        best = np.inf
+        for k in stems:
+            if k == cell:
+                continue
+            d = np.array(self.grid["cells"][k][:2], float) - c
+            s_, l_ = float(d @ back), abs(float(d @ lat_ax))
+            for s0, s1, hw in boxes:
+                best = min(best, float(np.hypot(max(0.0, s0 - s_, s_ - s1), max(0.0, l_ - hw))))
+        return best
+
+    def grasp_joints(self, T_grasp, ci: int = 0, q_seed=None):
+        """the grasp in configuration ci of the job (or from q_seed, a cell's own taught grasp): a straight move of the
+        hand from the taught grasp"""
+        q0 = self.configs[ci]["q_ref"] if q_seed is None else np.asarray(q_seed, float)
+        pcs, why = self.chain(q0, [("to the cell", T_grasp)])
+        return (pcs[-1][1][-1], "") if pcs is not None else (None, f"not reachable in this arm configuration ({why})")
 
     def config_for(self, cell: str, hole: int):
         """the first taught configuration that reaches this cell and lets go into this hole, or None"""
@@ -244,8 +269,40 @@ class Program:
         except (KeyError, TypeError):
             return False
 
+    def quick_holes(self, q_lift, below, world, holes) -> dict:
+        """for these holes, the first heading from which a flat hand carried from this lift pose lets go into it (joint
+        continuity of the whole way, the release clear in world): {hole: heading}; a quick filter before the plans"""
+        T_l = self.G_of(q_lift)
+        T_up = T_l.copy()
+        T_up[2, 3] = self.z_carry(T_l[2, 3], below)
+        pcs, _w = self.chain(q_lift, [("up", T_up)], sparse=False)
+        if pcs is None:
+            return {}
+        q_up = pcs[-1][1][-1]
+        out = {}
+        for h in holes:
+            for dy in HEADINGS:
+                for raise_m in (0.0, 0.01, 0.02, 0.03):
+                    H = self.hole_poses(h, dy, below, raise_m)
+                    T_ac = H["at"](T_up[2, 3])
+                    full, _w = self.chain(q_up, [("carry", T_ac), ("above", H["above"]), ("insert", H["insert"]), ("back", H["back"]),
+                                                 ("up after", H["up after"])], sparse=False)
+                    if full is None:
+                        full, _w = self.chain(q_up, [("turn", make_T(T_ac[:3, :3], T_up[:3, 3])), ("carry", T_ac), ("above", H["above"]),
+                                                     ("insert", H["insert"]), ("back", H["back"]), ("up after", H["up after"])], sparse=False)
+                    if full is None:
+                        break  # this heading cannot be followed: letting go higher does not help
+                    if world.ok(full[-3][1][-1], plug=False) and world.ok(full[-1][1][-1], plug=False):
+                        out[h] = dy
+                        break
+                if h in out:
+                    break
+        return out
+
     def to_dict(self) -> dict:
         return {"layout": self.layout(), "yaw": self.yaw, "hole_order": self.hole_order,
+                "cells": {k: {"yaw": v["yaw"], "q": np.asarray(v["q"]).tolist(), "note": v.get("note", ""), "cap": v.get("cap", 0.035)}
+                          for k, v in self.cell_prog.items()},
                 "configs": [{"q_ref": c["q_ref"].tolist(), "ref_T": np.asarray(c["ref_T"]).tolist(), "ref": c["ref"],
                              "posture": float(c["posture"]), "cells": c["cells"],
                              "hole_heading": {str(k): v for k, v in c["hole_heading"].items()}} for c in self.configs]}
@@ -254,6 +311,8 @@ class Program:
         self.yaw = float(d["yaw"])
         self.R, self.a = flat_R(self.yaw)
         self.hole_order = [int(h) for h in d.get("hole_order", self.hole_order)]
+        self.cell_prog = {k: {"yaw": float(v["yaw"]), "q": np.array(v["q"]), "note": v.get("note", ""), "cap": float(v.get("cap", 0.035))}
+                          for k, v in d.get("cells", {}).items()}
         self.configs = [{"q_ref": np.array(c["q_ref"]), "ref_T": np.array(c["ref_T"]), "ref": c["ref"], "posture": c["posture"],
                          "cells": list(c["cells"]), "hole_heading": {int(k): float(v) for k, v in c["hole_heading"].items()}}
                         for c in d.get("configs", [])]

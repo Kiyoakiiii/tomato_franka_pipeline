@@ -35,6 +35,7 @@ def main() -> int:
     ap.add_argument("--approach-deg", type=float, default=15.0, help="build: the approach direction for every cell, turned "
                     "this far towards the robot's right from straight out at the tray's centre (plants taken right to left)")
     ap.add_argument("--finger-clearance-mm", type=float, default=3.0)
+    ap.add_argument("--only", default="", help="build: work out the program only for these cells (comma list; testing)")
     ap.add_argument("--reteach", action="store_true", help="build: teach again even if the layout did not change")
     args = ap.parse_args()
     cfg = config_from_args(args)
@@ -76,6 +77,8 @@ def main() -> int:
         from seedling.order import plant_order
 
         plants = plant_order(grid, occupied)
+        if args.only:
+            plants = [k for k in plants if k in args.only.split(",")]
         if not plants:
             print("no plants in the tray")
             return 1
@@ -94,43 +97,116 @@ def main() -> int:
             return 1
         # the whole job once, in its order (each plant's cell gone after it, each hole taken after it): which plants and
         # holes the program reaches
+        # the holes in the program's order, those the taught configurations let go into first (a plant's own variant
+        # may reach the others)
         holes = [h for h in prog.hole_order if h in free and any(h in c_["hole_heading"] for c_ in prog.configs)]
-        print(f"the job: {len(plants)} plants, {len(holes)} free holes the program reaches (of {len(free)} free)")
-        done, left_holes = [], list(holes)
-        for k in plants:
-            if not left_holes:
-                break
-            why_k = []
-            for h in left_holes:
-                ci = prog.config_for(k, h)
-                if ci is None:
-                    why_k.append(f"H{h}: no taught configuration reaches it")
+        holes += [h for h in prog.hole_order if h in free and h not in holes]
+        print(f"the job: {len(plants)} plants, {len(free)} free holes")
+        # the program for every plant, in the job's order (the plants before it gone, the holes before it filled):
+        # the default template (the program's approach, the taught configuration) if it grasps the plant and lets it go
+        # into a free hole; otherwise the variant that does: the approach turned (straight and from the emptied side
+        # first) and / or the plant's own arm configuration. Worked out once; the run only moves it to the soil height
+        # kept from the last build (the same layout): each cell's program, and the cells found impossible with the same
+        # holes left (worked out again when the holes differ, e.g. an emptied disc)
+        no_way = (old or {}).get("no_way", {}) if prog.cell_prog else {}
+        if True:
+            done, left_holes = [], list(holes)
+            for k in plants:
+                if not left_holes:
+                    break
+                if k in prog.cell_prog:
+                    # its program is known: which of the holes left it goes into (the plan, ~0.5 s)
+                    r = grasp_plan(prog, k, cfg, grid, disc, None, [p for p in planted if p not in done], world_disc, check_pieces,
+                                   soil_info(grid, k, None, prog.tray_top), args, write=False, variant=prog.cell_prog[k],
+                                   stems=[x for x in occupied if x not in done])
+                    h_ok = None
+                    if not isinstance(r, str):
+                        for h in left_holes:
+                            if not isinstance(place_plan(prog, k, h, r, [p for p in planted if p not in done + [k]], world_disc,
+                                                         check_pieces, extra_taken=[x for x in holes if x not in left_holes]), str):
+                                h_ok = h
+                                break
+                    if h_ok is not None:
+                        print(f"  {k} -> H{h_ok}: {prog.cell_prog[k].get('note', '')} (as before)")
+                        done.append(k)
+                        left_holes.remove(h_ok)
+                        continue
+                    del prog.cell_prog[k]
+                if no_way.get(k) == left_holes:
+                    print(f"  {k}: no way (found before, with the same holes left)")
                     continue
-                r = grasp_plan(prog, k, cfg, grid, disc, None, [p for p in planted if p not in done], world_disc, check_pieces,
-                               soil_info(grid, k, None, prog.tray_top), args, write=False, ci=ci)
-                if isinstance(r, str):
-                    why_k.append(f"H{h}: no grasp ({r})")
+                stems = [x for x in occupied if x not in done]
+                si_k = soil_info(grid, k, None, prog.tray_top)
+                found, why_k = None, []
+                grasped = [False]  # some variant grasps it (then failing means no hole left that a flat hand reaches)
+
+                def try_variant(variant, ci=0, note=""):
+                    r = grasp_plan(prog, k, cfg, grid, disc, None, [p for p in planted if p not in done], world_disc, check_pieces,
+                                   si_k, args, write=False, ci=ci, variant=variant, stems=stems)
+                    if isinstance(r, str):
+                        why_k.append(f"{note}: no grasp ({r})")
+                        return None
+                    # which holes a flat hand reaches from this grasp (quick: continuity, release clear), then the full
+                    # placement plan for those only
+                    from seedling.program import PLUG
+
+                    grasped[0] = True
+                    taken_b = [x for x in holes if x not in left_holes]
+                    below_k = float(r["close_point"][2] - r["soil_z"] + PLUG)
+                    hh = prog.quick_holes(np.array(r["q"]["lift"]), below_k, world_disc(taken_b), left_holes)
+                    pl = "no hole a flat hand reaches from this grasp"
+                    for h in left_holes:
+                        if h not in hh:
+                            continue
+                        pl = place_plan(prog, k, h, r, [p for p in planted if p not in done + [k]], world_disc, check_pieces,
+                                        extra_taken=taken_b, write=False, prefer=hh[h])
+                        if not isinstance(pl, str):
+                            return (h, r, note)
+                    why_k.append(f"{note}: {pl}")
+                    return None
+
+                for ci in range(len(prog.configs)):
+                    found = try_variant(None, ci, f"default template, configuration {ci + 1}")
+                    if found:
+                        break
+                for cap in (0.035, 0.050):  # grasped at most 35 mm above the soil, then (deep in the tray) 50
+                    if found:
+                        break
+                    for off in variant_offsets(prog, k, stems):
+                        yaw = prog.yaw + np.radians(off)
+                        P = prog.cell_poses(k, si_k["soil"] + si_k["height"], yaw)
+                        seeds = [c_["q_ref"] for c_ in prog.configs] + own_solutions(prog, P, world_disc())
+                        for si_, q0 in enumerate(seeds):
+                            found = try_variant({"yaw": yaw, "q": q0, "cap": cap}, 0, f"approach {off:+.0f} deg from the program's, "
+                                                f"{'configuration ' + str(si_ + 1) if si_ < len(prog.configs) else 'its own arm configuration'}"
+                                                + (f", grasped up to {cap * 1000:.0f} mm above the soil" if cap > 0.035 else ""))
+                            if found:
+                                break
+                        if found:
+                            break
+                if not found:
+                    no_way[k] = list(left_holes)
+                    print(f"  {k}: no way found ({'; '.join(why_k[-3:])})")
+                    if grasped[0] and all("no hole" in w_ or "no grasp" in w_ for w_ in why_k):
+                        print(f"  the free holes left ({', '.join(f'H{h}' for h in left_holes)}) are not reached by a flat hand from "
+                              f"{k}'s grasps: the disc counts as full for this job")
+                        break
                     continue
-                taken_before = [x for x in holes if x not in left_holes]
-                pl = place_plan(prog, k, h, r, [p for p in planted if p not in done + [k]], world_disc, check_pieces,
-                                extra_taken=taken_before, write=False)
-                if isinstance(pl, str):
-                    why_k.append(f"H{h}: {pl}")
-                    continue
-                print(f"  {k} -> H{h} (configuration {ci + 1})")
+                h, r, note = found
+                prog.cell_prog[k] = {"yaw": float(r["yaw"]), "q": np.array(r["q"]["grasp"]), "note": note,
+                                     "cap": 0.050 if "50 mm" in note else 0.035}
+                print(f"  {k} -> H{h}: {note}")
                 done.append(k)
                 left_holes.remove(h)
-                break
-            else:
-                print(f"  {k}: not in this program ({'; '.join(why_k[:2])})")
+            PROG.write_text(json.dumps({**prog.to_dict(), "approach_deg": args.approach_deg, "no_way": no_way}, indent=1))
         print(f"program built in {time.time() - t0:.1f} s")
         return 0
 
     prog.load(json.loads(PROG.read_text()))
     if args.action == "grasp":
-        ci = prog.config_for(args.cell, args.hole)
-        if ci is None:
-            print(f"{args.cell}: no taught configuration reaches it and lets go into H{args.hole}")
+        variant = prog.cell_prog.get(args.cell)
+        if variant is None:
+            print(f"{args.cell}: not in the program (no way to grasp it and let it go into a free hole was found when it was built)")
             return 1
         robot_q = None
         obs_from = None
@@ -154,7 +230,8 @@ def main() -> int:
             obs["soil_used"] = si["soil"]
             obs_file.write_text(json.dumps(obs, indent=1))
         r = grasp_plan(prog, args.cell, cfg, grid, disc, robot_q, planted, world_disc, check_pieces, si, args,
-                       write=True, obs_from=obs_from, finger_floor=finger_floor_fn(cfg, args, si, obs, T_FC), ci=ci)
+                       write=True, obs_from=obs_from, finger_floor=finger_floor_fn(cfg, args, si, obs, T_FC), variant=variant,
+                       stems=[k for k in occupied if k != args.cell])
         if isinstance(r, str):
             print(f"{args.cell}: no grasp in the program ({r})")
             return 1
@@ -173,6 +250,29 @@ def main() -> int:
         return 1
     print(f"placement planned in {time.time() - t0:.1f} s")
     return 0
+
+
+def variant_offsets(prog, cell, stems, offsets=(0, -10, 10, -20, 20, -30, 30, 45, -45, 60, -60)):
+    """approach offsets (deg from the program's direction) to try for a cell, best first: off straight costs its
+    angle, 5 per mm the open hand comes closer than 15 mm to another plant's stem; closer than 5 mm left out"""
+    out = []
+    for off in offsets:
+        clr = prog.hand_clearance(cell, prog.yaw + np.radians(off), stems) * 1000
+        if clr >= 5.0:
+            out.append((abs(off) + 5.0 * max(0.0, 15.0 - clr), off))
+    return [o for _, o in sorted(out)][:6]
+
+
+def own_solutions(prog, P, world, n=4):
+    """the plant's own clear joint solutions of its grasp pose, the most natural first"""
+    from seedling import cartesian, kinematics
+    from seedling.transforms import inv_T
+
+    sols = kinematics.ik_all(P["grasp"] @ inv_T(prog.G), prog.F, limit_margin_rad=prog.margin)
+    c = sorted(((cartesian.posture_cost(q, P["close"][:2]), q) for q in sols
+                if np.linalg.norm(prog.G_of(q)[:3, 3] - P["grasp"][:3, 3]) <= 0.0015 and world.ok(q, fingers=False, plants=False)),
+               key=lambda t: t[0])
+    return [q for _, q in c[:n]]
 
 
 def soil_info(grid, cell, obs, tray_top, disagree=0.008, plug_dz=0.013, leafy_cover=0.35):
@@ -246,24 +346,33 @@ def observe_pose(cfg, grid, cell, T_FC, tray_top):
 
 
 def grasp_plan(prog, cell, cfg, grid, disc, q_start, planted, world_disc, check_pieces, si, args, write=False,
-               obs_from=None, finger_floor=None, ci=0):
+               obs_from=None, finger_floor=None, ci=0, variant=None, stems=None):
     """the template at this cell: the plan dict (65's format), or why not (str)"""
     from seedling.program import RIM
     from seedling.planner import plan_path
 
+    yaw = float(variant["yaw"]) if variant is not None else prog.yaw
+    seed = variant["q"] if variant is not None else None
+    # the open hand's way in must not pass through another plant (its stem within 5 mm of what the hand sweeps)
+    if stems is not None:
+        clr = prog.hand_clearance(cell, yaw, stems)
+        if clr < 0.005:
+            return f"the hand would pass through other plants (within {clr * 1000:.0f} mm of a stem)"
     soil, height = si["soil"], si["height"]
-    z_cap = soil + max(height, 0.035)
+    # the highest closing point: 35 mm above the soil (the estimate), a variant may allow more (deep in the tray the
+    # wrist behind the flat hand is over the tray: 2026-11-05, row D, link7 4 mm over the tray top at 35 mm)
+    z_cap = soil + max(height, float((variant or {}).get("cap", 0.035)))
     z_close = max(soil + height, prog.tray_top + RIM)
     c = np.array(grid["cells"][cell], float)
     if finger_floor is not None:
-        zf = finger_floor(c, prog.yaw)
+        zf = finger_floor(c, yaw)
         if zf is not None and zf > z_close:
             print(f"closing point raised {(zf - z_close) * 1000:.0f} mm: the open fingers clear the neighbouring soil")
             z_close = zf
     w_at = world_disc()  # at the plant: fingers and plants not checked (the heading keeps the hand off the others)
     for _ in range(4):
-        P = prog.cell_poses(cell, z_close)
-        q_g, why = prog.grasp_joints(P["grasp"], ci)
+        P = prog.cell_poses(cell, z_close, yaw)
+        q_g, why = prog.grasp_joints(P["grasp"], ci, q_seed=seed)
         if q_g is None:
             return why
         cl = w_at.clearances(q_g, fingers=False, plants=False)
@@ -305,13 +414,13 @@ def grasp_plan(prog, cell, cfg, grid, disc, q_start, planted, world_disc, check_
                 if path is None:
                     return "no safe turn from the observation pose to the stage"
                 vias = list(path[:-1])
-    yaw_rel = float(np.degrees((prog.yaw - np.arctan2(c[1], c[0]) + np.pi) % (2 * np.pi) - np.pi))
-    plan = {"cell": cell, "close_point": P["close"].tolist(), "offset_mm": [0.0, 0.0], "R": prog.R.tolist(),
+    yaw_rel = float(np.degrees((yaw - np.arctan2(c[1], c[0]) + np.pi) % (2 * np.pi) - np.pi))
+    plan = {"cell": cell, "close_point": P["close"].tolist(), "offset_mm": [0.0, 0.0], "R": P["R"].tolist(),
             "q": {"start": (q_start if q_start is not None else tpl["stage"]).tolist(), "stage": tpl["stage"].tolist(),
                   "pregrasp": tpl["pregrasp"].tolist(), "grasp": tpl["grasp"].tolist(), "lift": tpl["lift"].tolist()},
             "vias": [np.asarray(v).tolist() for v in vias],
             **{f"{n}_vias": [np.asarray(w).tolist() for w in wps[:-1]] for n, _q0, wps in tpl["pieces"]},
-            "z_close": round(float(z_close), 4), "tray_top": round(prog.tray_top, 4), "yaw": prog.yaw, "soil_z": si["soil"],
+            "z_close": round(float(z_close), 4), "tray_top": round(prog.tray_top, 4), "yaw": yaw, "soil_z": si["soil"],
             **(obs_from or {}), "cell_xy": [float(v) for v in c[:2]], "program": True, "config": ci, "safe": True}
     if write:
         print(f"soil surface of {cell}: z {si['soil']:.3f} ({(si['soil'] - prog.tray_top) * 1000:+.0f} mm vs the tray top) from {si['src']}")
@@ -323,7 +432,7 @@ def grasp_plan(prog, cell, cfg, grid, disc, q_start, planted, world_disc, check_
     return plan
 
 
-def place_plan(prog, cell, hole, gp, left, world_disc, check_pieces, extra_taken=(), write=False):
+def place_plan(prog, cell, hole, gp, left, world_disc, check_pieces, extra_taken=(), write=False, prefer=None):
     """the template from this grasp into this hole: the plan dict (71's format), or why not (str)"""
     from seedling.program import HEADINGS, MAX_TILT, PLUG
 
@@ -344,7 +453,8 @@ def place_plan(prog, cell, hole, gp, left, world_disc, check_pieces, extra_taken
         return f"straight up: {bad}"
     q_up = up[0][1][-1]
     taught = prog.configs[int(gp.get("config", 0))]["hole_heading"] if prog.configs else {}
-    heads = ([taught[hole]] if hole in taught else []) + [h for h in HEADINGS if h != taught.get(hole)]
+    first = [prefer] if prefer is not None else ([taught[hole]] if hole in taught else [])
+    heads = first + [h for h in HEADINGS if h not in first]
     last = "no heading"
     for dy in heads:
         for raise_m in (0.0, 0.01, 0.02, 0.03):

@@ -109,7 +109,7 @@ def _run(args, cfg, gdir, stop, run, env_plan) -> int:
         return 1
     print(f"(program ready in {time.time() - t0:.1f} s)")
     prog = json.loads((gdir / "program.json").read_text())
-    hole_order = [h for h in prog["hole_order"] if any(str(h) in c["hole_heading"] for c in prog["configs"])]
+    hole_order = list(prog["hole_order"])
 
     done, placed, failed = 0, [], set()
     skip = set(filter(None, args.skip.split(",")))
@@ -133,10 +133,12 @@ def _run(args, cfg, gdir, stop, run, env_plan) -> int:
         t1 = time.time()
         chosen = None
         for k in todo:
+            if k not in prog.get("cells", {}):
+                continue  # the program has no way for it (76 build said why)
+            rg, og = run(["scripts/76_program.py", "grasp", "--cell", k, "--from-observe"], quiet=True, env=env_plan)
+            if rg != 0:
+                continue
             for hole in free:
-                rg, og = run(["scripts/76_program.py", "grasp", "--cell", k, "--hole", str(hole), "--from-observe"], quiet=True, env=env_plan)
-                if rg != 0:
-                    continue
                 rp, op = run(["scripts/76_program.py", "place", "--cell", k, "--hole", str(hole)], quiet=True, env=env_plan)
                 if rp == 0:
                     chosen = (k, hole)
