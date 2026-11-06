@@ -161,18 +161,18 @@ JOINT_WEIGHTS = np.array([1.0, 1.0, 1.0, 1.0, 0.7, 0.7, 1.0])  # big joints swee
 
 
 def plan_observation(target_B: np.ndarray, q_now: np.ndarray, T_FC: np.ndarray, floor_z: float, cfg: dict,
-                     _global_ik: bool | None = None) -> ObservationPlan:
+                     _global_ik: bool | None = None, valid=None) -> ObservationPlan:
     """(see below) First only the IK solutions reached from the current joints; the global IK (random starts) for the
     views that have none only when that finds no pose at all (2026-11-04: 1.7 s instead of 6.5 s per cell; the far
     cells still need the global one)"""
     if _global_ik is None:
-        pl = plan_observation(target_B, q_now, T_FC, floor_z, cfg, _global_ik=False)
-        return pl if pl.ok else plan_observation(target_B, q_now, T_FC, floor_z, cfg, _global_ik=True)
-    return _plan_observation(target_B, q_now, T_FC, floor_z, cfg, _global_ik)
+        pl = plan_observation(target_B, q_now, T_FC, floor_z, cfg, _global_ik=False, valid=valid)
+        return pl if pl.ok else plan_observation(target_B, q_now, T_FC, floor_z, cfg, _global_ik=True, valid=valid)
+    return _plan_observation(target_B, q_now, T_FC, floor_z, cfg, _global_ik, valid)
 
 
 def _plan_observation(target_B: np.ndarray, q_now: np.ndarray, T_FC: np.ndarray, floor_z: float, cfg: dict,
-                      global_ik: bool) -> ObservationPlan:
+                      global_ik: bool, valid=None) -> ObservationPlan:
     """For the first elevation (config order) that has any valid candidate: the azimuth/roll candidate with the
     least weighted joint change that is reachable and keeps the arm body above ``floor_z`` (or, if it starts
     below, never lower than it starts) along the whole joint path. With observe.all_elevations, every elevation
@@ -203,6 +203,9 @@ def _plan_observation(target_B: np.ndarray, q_now: np.ndarray, T_FC: np.ndarray,
                 bad = [j for j, (lo, hi) in (o.get("joint_range_rad") or {}).items() if not lo <= q[int(j) - 1] <= hi]
                 if bad:
                     tried.append((desc, f"joint {bad[0]} outside the calibrated range"))
+                    continue
+                if valid is not None and not valid(q):  # the caller's condition (e.g. clear of the plants in the disc)
+                    tried.append((desc, "not clear (the caller's world)"))
                     continue
                 p_G = apply_T(T_BE @ ee_to_contact(cfg), np.zeros(3))
                 out = [ax for i, ax in enumerate("xyz") if not ws[ax][0] <= p_G[i] <= ws[ax][1]]

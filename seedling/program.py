@@ -19,8 +19,28 @@ from __future__ import annotations
 
 import numpy as np
 
+import os
+
 from . import cartesian, kinematics
 from .transforms import inv_T, make_T
+
+_TEACH = None  # (program, candidates, ...) for the forked teaching processes
+
+
+def _teach_eval(i):
+    """one teaching candidate: (plants reached, {hole: heading}) or None (run in a forked process)"""
+    self, cand, plants, poses, world, world_disc, below, holes = _TEACH
+    ref, pc, q, P = cand[i]
+    tpl, _w = self.template(q, P)
+    if tpl is None:
+        return None
+    self.configs = [{"q_ref": q}]
+    reach = []
+    for k in plants:
+        qg = self.grasp_joints(poses[k]["grasp"])[0]
+        if qg is not None and world.ok(qg, fingers=False, plants=False):
+            reach.append(k)
+    return reach, self._teach_holes(tpl["lift"], below, world_disc, holes)
 
 # the geometry of the template (the values 65 / 71 used)
 STANDOFF = 0.060      # pre-grasp behind the grasp
@@ -189,28 +209,41 @@ class Program:
         z_est = self.tray_top + 0.013 + HEIGHT_EST
         below = HEIGHT_EST + PLUG
         poses = {k: self.cell_poses(k, z_est) for k in plants}
-        found = []
-        self.configs = [None]
+        # the candidates: every clear joint solution of each reference grasp, the most natural first
+        cand = []
         for ref in refs:
             P = poses[ref]
             sols = kinematics.ik_all(P["grasp"] @ inv_T(self.G), self.F, limit_margin_rad=self.margin)
-            cands = sorted(((cartesian.posture_cost(q, P["close"][:2]), q) for q in sols
-                            if np.linalg.norm(self.G_of(q)[:3, 3] - P["grasp"][:3, 3]) <= 0.0015 and world.ok(q, fingers=False, plants=False)),
-                           key=lambda c_: c_[0])
-            for pc, q in cands[:per_ref]:
-                if any(np.abs(q - f_["q_ref"]).max() < np.radians(5) and f_["ref"] == ref for f_ in found):
-                    continue
-                tpl, _w = self.template(q, P)
-                if tpl is None:
-                    continue
-                self.configs[0] = {"q_ref": q}
-                reach = [k for k in plants if (lambda qg: qg is not None and world.ok(qg, fingers=False, plants=False))(self.grasp_joints(poses[k]["grasp"])[0])]
-                headings = self._teach_holes(tpl["lift"], below, world_disc, holes)
-                found.append({"q_ref": q, "ref_T": P["grasp"], "ref": ref, "posture": pc, "cells": reach, "hole_heading": headings})
-                if len(headings) == len(holes if holes is not None else self.hole_order):
-                    break  # every hole from this one (the most natural so far that does): no need to look further
-            if found and len(found[-1]["hole_heading"]) == len(holes if holes is not None else self.hole_order):
-                break
+            cs = sorted(((cartesian.posture_cost(q, P["close"][:2]), q) for q in sols
+                         if np.linalg.norm(self.G_of(q)[:3, 3] - P["grasp"][:3, 3]) <= 0.0015 and world.ok(q, fingers=False, plants=False)),
+                        key=lambda c_: c_[0])
+            cand += [(ref, pc, q, P) for pc, q in cs[:per_ref]]
+        # evaluated a few at a time in parallel processes (forked: the models are inherited), in that order; done when a
+        # batch has one that lets go into every hole (2026-11-05: 12 one after the other took up to 25 s)
+        global _TEACH
+        _TEACH = (self, cand, plants, poses, world, world_disc, below, holes)
+        n_all = len(holes if holes is not None else self.hole_order)
+        found = []
+        procs = max(1, int(os.environ.get("SEEDLING_PLAN_PROCS", "4")))
+        import multiprocessing as mp
+
+        pool = mp.get_context("fork").Pool(min(procs, max(1, len(cand)))) if procs > 1 and len(cand) > 1 else None
+        try:
+            for b0 in range(0, len(cand), procs):
+                idx = list(range(b0, min(len(cand), b0 + procs)))
+                res = pool.map(_teach_eval, idx) if pool is not None else [_teach_eval(i) for i in idx]
+                for i, r in zip(idx, res):
+                    if r is None:
+                        continue
+                    ref, pc, q, P = cand[i]
+                    found.append({"q_ref": q, "ref_T": P["grasp"], "ref": ref, "posture": pc, "cells": r[0], "hole_heading": r[1]})
+                if any(len(f_["hole_heading"]) == n_all for f_ in found):
+                    break
+        finally:
+            if pool is not None:
+                pool.close()
+                pool.join()
+            _TEACH = None
         chosen, used, covered = [], set(), set()
         while True:
             rest = [i for i, f_ in enumerate(found) if i not in used and f_["cells"] and set(f_["hole_heading"]) - covered]
@@ -313,7 +346,8 @@ class Program:
                 "cells": {k: {"yaw": v["yaw"], "q": np.asarray(v["q"]).tolist(), "note": v.get("note", ""), "cap": v.get("cap", 0.035),
                               "observe": v.get("observe", "near"),
                               "observe_q": None if v.get("observe_q") is None else np.asarray(v["observe_q"]).tolist(),
-                              "observe_desc": v.get("observe_desc", "")} for k, v in self.cell_prog.items()},
+                              "observe_desc": v.get("observe_desc", ""), "hole": v.get("hole"), "z_close": v.get("z_close")}
+                          for k, v in self.cell_prog.items()},
                 "configs": [{"q_ref": c["q_ref"].tolist(), "ref_T": np.asarray(c["ref_T"]).tolist(), "ref": c["ref"],
                              "posture": float(c["posture"]), "cells": c["cells"],
                              "hole_heading": {str(k): v for k, v in c["hole_heading"].items()}} for c in self.configs]}
@@ -325,7 +359,8 @@ class Program:
         self.cell_prog = {k: {"yaw": float(v["yaw"]), "q": np.array(v["q"]), "note": v.get("note", ""), "cap": float(v.get("cap", 0.035)),
                               "observe": v.get("observe", "near"),
                               "observe_q": None if v.get("observe_q") is None else np.array(v["observe_q"]),
-                              "observe_desc": v.get("observe_desc", "")} for k, v in d.get("cells", {}).items()}
+                              "observe_desc": v.get("observe_desc", ""), "hole": v.get("hole"), "z_close": v.get("z_close")}
+                          for k, v in d.get("cells", {}).items()}
         self.configs = [{"q_ref": np.array(c["q_ref"]), "ref_T": np.array(c["ref_T"]), "ref": c["ref"], "posture": c["posture"],
                          "cells": list(c["cells"]), "hole_heading": {int(k): float(v) for k, v in c["hole_heading"].items()}}
                         for c in d.get("configs", [])]

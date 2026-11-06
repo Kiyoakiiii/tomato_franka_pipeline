@@ -59,7 +59,8 @@ def main() -> int:
              ("close", ["scripts/66_gripper.py", "close"]),
              ("lift", ["scripts/65_side_grasp.py", "lift", *c])]
     if args.no_observe:
-        steps = steps[1:]
+        # no close-up: from the overview pose, as the program checked the turn from there (76 build)
+        steps = [("to the overview", ["scripts/68_goto_overview.py"])] + steps[1:]
     if args.program:
         if not args.place:
             print("--program needs --place HOLE")
@@ -114,7 +115,9 @@ def main() -> int:
         if r.returncode != 0:
             print(f"step {i} ({name}) failed or refused (exit {r.returncode}): cycle stopped", flush=True)
             # exit 3: no plan, the plant not touched (the arm at most at the observation pose): 72 goes on with another
-            return 3 if name in ("plan", "plan the placement") else 1
+            # (the close-up too: the arm only went to the observation pose, or did not move; "no safe way there" is this
+            # plant's alone)
+            return 3 if name in ("observe the plug", "plan", "plan the placement") else 1
         if name == "lift" and args.hold_s > 0:
             time.sleep(args.hold_s)
     print("CYCLE DONE", flush=True)
