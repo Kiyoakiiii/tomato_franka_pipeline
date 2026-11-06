@@ -175,9 +175,11 @@ class Program:
         more when one configuration cannot reach every hole with a flat hand (2026-11-05: a disc 0.45 m out and low:
         H6 from one, H3 / H5 only from another). world: the arm at the tray (plants not checked at the grasp);
         world_disc(taken holes) -> a world with plants in those holes (for letting go)"""
-        cells = np.array([self.grid["cells"][k][:2] for k in plants], float)
+        # taught on the row taken first (the nearest; deeper rows may need a variant): its middle plants first
+        row = [k for k in plants if k[0] == plants[0][0]]
+        cells = np.array([self.grid["cells"][k][:2] for k in row], float)
         mid = cells.mean(0)
-        refs = sorted(plants, key=lambda k: np.hypot(*(np.array(self.grid["cells"][k][:2]) - mid)))[:max_refs]
+        refs = sorted(row, key=lambda k: np.hypot(*(np.array(self.grid["cells"][k][:2]) - mid)))[:max_refs]
         z_est = self.tray_top + 0.013 + HEIGHT_EST
         below = HEIGHT_EST + PLUG
         poses = {k: self.cell_poses(k, z_est) for k in plants}

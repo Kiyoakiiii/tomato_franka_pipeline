@@ -35,6 +35,8 @@ def main() -> int:
     ap.add_argument("--approach-deg", type=float, default=15.0, help="build: the approach direction for every cell, turned "
                     "this far towards the robot's right from straight out at the tray's centre (plants taken right to left)")
     ap.add_argument("--finger-clearance-mm", type=float, default=3.0)
+    ap.add_argument("--grid", default=None, help="build: the tray file to use (testing; default the current one)")
+    ap.add_argument("--free", default=None, help="build: comma list of the free holes to assume (testing)")
     ap.add_argument("--only", default="", help="build: work out the program only for these cells (comma list; testing)")
     ap.add_argument("--reteach", action="store_true", help="build: teach again even if the layout did not change")
     args = ap.parse_args()
@@ -46,8 +48,10 @@ def main() -> int:
 
     t0 = time.time()
     T_FC, _ = load_T_FC(cfg)
-    grid = json.loads((PROJECT_DIR / cfg["tray"]["grid_file"]).read_text())
+    grid = json.loads(((PROJECT_DIR / args.grid) if args.grid else (PROJECT_DIR / cfg["tray"]["grid_file"])).read_text())
     disc = json.loads((PROJECT_DIR / "calibration" / "disc.json").read_text())
+    if args.free is not None:
+        disc["free_holes"] = [int(h) for h in args.free.split(",") if h]
     gone = set(filter(None, args.ignore_cells.split(",")))
     planted = [k for k in (grid.get("planted") or grid.get("occupied", [])) if k not in gone]
     occupied = [k for k in grid.get("occupied", []) if k not in gone]
@@ -56,11 +60,15 @@ def main() -> int:
     prog = Program(cfg, T_FC, grid, disc, approach_deg=args.approach_deg)
     worlds = {}
 
-    def world_disc(extra_taken=(), plants=None, held=None):
-        key = (tuple(sorted(set(taken) | set(extra_taken))), tuple(plants if plants is not None else planted), held)
+    def world_disc(extra_taken=(), plants=None, held=None, stems=False):
+        """the world with these holes taken; stems: letting go, the plants in the disc taken as their stems (10 mm, 5 mm
+        clear: the open fingers pass the neighbours as they pass the neighbours in the tray; holes 57.5 mm apart) instead
+        of 20 mm + 10 mm (2026-11-05: H2 and H4 were refused for fingers 2-24 mm into that)"""
+        key = (tuple(sorted(set(taken) | set(extra_taken))), tuple(plants if plants is not None else planted), held, stems)
         if key not in worlds:
             worlds[key] = World(cfg, T_FC, grid, disc, tray_plants=list(key[1]), taken_holes=list(key[0]),
-                                held_below_m=held, hold_forward_m=prog.fwd if held else 0.0)
+                                held_below_m=held, hold_forward_m=prog.fwd if held else 0.0,
+                                overrides={"placed_plant_radius_mm": 10.0, "plant_clearance_mm": 5.0} if stems else None)
         return worlds[key]
 
     def check_pieces(world, q0, wps, **kw):
@@ -77,6 +85,10 @@ def main() -> int:
         from seedling.order import plant_order
 
         plants = plant_order(grid, occupied)
+        if args.grid or args.free is not None:
+            PROG_SAVE = False
+        else:
+            PROG_SAVE = True
         if args.only:
             plants = [k for k in plants if k in args.only.split(",")]
         if not plants:
@@ -91,8 +103,9 @@ def main() -> int:
             print(f"the tray and the disc are where they were: the program taught then is used ({len(prog.configs)} configuration(s))")
             ok = True
         else:
-            ok = prog.teach(plants, world_disc(), lambda filled: world_disc(filled))
-            PROG.write_text(json.dumps({**prog.to_dict(), "approach_deg": args.approach_deg}, indent=1))
+            ok = prog.teach(plants, world_disc(), lambda filled: world_disc(filled, stems=True))
+            if PROG_SAVE:
+                PROG.write_text(json.dumps({**prog.to_dict(), "approach_deg": args.approach_deg}, indent=1))
         if not ok:
             return 1
         # the whole job once, in its order (each plant's cell gone after it, each hole taken after it): which plants and
@@ -153,7 +166,7 @@ def main() -> int:
                     grasped[0] = True
                     taken_b = [x for x in holes if x not in left_holes]
                     below_k = float(r["close_point"][2] - r["soil_z"] + PLUG)
-                    hh = prog.quick_holes(np.array(r["q"]["lift"]), below_k, world_disc(taken_b), left_holes)
+                    hh = prog.quick_holes(np.array(r["q"]["lift"]), below_k, world_disc(taken_b, stems=True), left_holes)
                     pl = "no hole a flat hand reaches from this grasp"
                     for h in left_holes:
                         if h not in hh:
@@ -169,10 +182,14 @@ def main() -> int:
                     found = try_variant(None, ci, f"default template, configuration {ci + 1}")
                     if found:
                         break
+                t_k = time.time()
                 for cap in (0.035, 0.050):  # grasped at most 35 mm above the soil, then (deep in the tray) 50
-                    if found:
+                    if found or time.time() - t_k > 15.0:
                         break
                     for off in variant_offsets(prog, k, stems):
+                        if time.time() - t_k > 15.0:
+                            why_k.append("15 s of variants tried")
+                            break
                         yaw = prog.yaw + np.radians(off)
                         P = prog.cell_poses(k, si_k["soil"] + si_k["height"], yaw)
                         seeds = [c_["q_ref"] for c_ in prog.configs] + own_solutions(prog, P, world_disc())
@@ -187,7 +204,7 @@ def main() -> int:
                 if not found:
                     no_way[k] = list(left_holes)
                     print(f"  {k}: no way found ({'; '.join(why_k[-3:])})")
-                    if grasped[0] and all("no hole" in w_ or "no grasp" in w_ for w_ in why_k):
+                    if grasped[0]:
                         print(f"  the free holes left ({', '.join(f'H{h}' for h in left_holes)}) are not reached by a flat hand from "
                               f"{k}'s grasps: the disc counts as full for this job")
                         break
@@ -198,7 +215,8 @@ def main() -> int:
                 print(f"  {k} -> H{h}: {note}")
                 done.append(k)
                 left_holes.remove(h)
-            PROG.write_text(json.dumps({**prog.to_dict(), "approach_deg": args.approach_deg, "no_way": no_way}, indent=1))
+            if PROG_SAVE:
+                PROG.write_text(json.dumps({**prog.to_dict(), "approach_deg": args.approach_deg, "no_way": no_way}, indent=1))
         print(f"program built in {time.time() - t0:.1f} s")
         return 0
 
@@ -444,7 +462,8 @@ def place_plan(prog, cell, hole, gp, left, world_disc, check_pieces, extra_taken
     T_up[2, 3] = prog.z_carry(T_l[2, 3], below)
     taken_now = list(extra_taken)
     w_carry = world_disc(taken_now, plants=left, held=below)
-    w_after = world_disc(taken_now + [hole], plants=left)
+    w_rel = world_disc(taken_now, plants=left, held=below, stems=True)  # going in: the neighbours as stems
+    w_after = world_disc(taken_now + [hole], plants=left, stems=True)  # letting go and backing out
     up, why = prog.chain(q_lift, [("up", T_up)], max_tilt=MAX_TILT)
     if up is None:
         return f"straight up: {why}"
@@ -471,7 +490,8 @@ def place_plan(prog, cell, hole, gp, left, world_disc, check_pieces, extra_taken
             if pin is None:
                 last = f"heading {dy:+.0f}: {why}"
                 break
-            bad = check_pieces(w_carry, q_ac, pin[0][2]) or check_pieces(w_carry, pin[0][1][-1], pin[1][2], plug=False)
+            # going down over the hole and in: the neighbours as stems (the carry above them kept the full plants)
+            bad = check_pieces(w_rel, q_ac, pin[0][2]) or check_pieces(w_rel, pin[0][1][-1], pin[1][2], plug=False)
             q_ins = pin[1][1][-1]
             pout, why = prog.chain(q_ins, [("back", H["back"]), ("up after", H["up after"])])
             if pout is None:

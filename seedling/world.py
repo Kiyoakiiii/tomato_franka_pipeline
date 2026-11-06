@@ -75,12 +75,14 @@ def _box(lo_hi):
 
 class World:
     def __init__(self, cfg: dict, T_FC: np.ndarray, grid: dict | None = None, disc: dict | None = None, *,
-                 tray_plants=None, taken_holes=None, held_below_m: float | None = None, hold_forward_m: float = 0.0):
+                 tray_plants=None, taken_holes=None, held_below_m: float | None = None, hold_forward_m: float = 0.0,
+                 overrides: dict | None = None):
         model, geoms, hulls, coal, pin, radii = _robot()
         self.link_r = radii
         self.model, self.data, self.geoms, self.hulls, self.coal, self.pin = model, model.createData(), geoms, hulls, coal, pin
         p = dict(DEFAULTS)
         p.update(cfg.get("world") or {})
+        p.update(overrides or {})
         self.p = {k: float(v) for k, v in p.items()}
         self.cfg, self.T_FC = cfg, T_FC
         self.F, self.G = flange_to_ee(cfg), ee_to_contact(cfg)
