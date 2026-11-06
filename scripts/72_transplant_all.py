@@ -1,18 +1,21 @@
 #!/usr/bin/env python
 """Transplant plants from the tray into the disc, nearest first, until the disc is full (or nothing reachable is
-left). Each round:
+left). The tray and the disc are located ONCE, at the start (overview pose 68, one picture 60: stop if either is not
+found); they do not move, so after each plant the state is updated (its cell empty, its hole taken: written to the
+grid and disc files the other scripts read) instead of going back and looking again (2026-11-05: ~20 s per plant).
+Each round:
 
-1. overview pose (68), locate tray and disc from one picture (60): stop if either is not found;
-2. the disc's free holes (a hole with a plug shows no red interior): none left -> done;
-3. the plants still in the tray, the row nearest the robot first, within a row from right to left (as seen from the
+1. the disc's free holes (a hole with a plug shows no red interior): none left -> done;
+2. the plants still in the tray, the row nearest the robot first, within a row from right to left (as seen from the
    robot) (a plug seen in the cell; cells whose only soil
    lies at the cell bottom, deeper than --scrap-depth-mm below the tray top, are soil scraps, not plugs);
    for each in turn a grasp plan (65, with an approach heading clear of the other plants) and a placement plan
    (71) are made without moving; the first plant with both safe is taken, the others wait for a later round
    (a plant behind others often becomes reachable once those are gone);
-4. the full cycle for it (69 --place): observe, grasp, lift, carry, insert, open, retreat, overview;
-5. check on the next overview picture: its cell must be empty and the hole it went into no longer free. Otherwise stop (the
-   gripper cannot feel whether it holds the plant: only the picture tells).
+3. the full cycle for it (69 --place --no-return): observe, grasp, lift, carry, insert, open, retreat; from there
+   straight to the next plant's observation pose;
+4. at the end, back at the overview, one picture: each plant's cell must be empty and its hole taken (the gripper
+   cannot feel whether it holds the plant: only the picture tells).
 
 touch experiments/grasp/STOP to stop after the current step (the running cycle stops at its next step).
 With --pause it waits for a key before the first move to the overview and before each plant (space: go on, q: stop).
@@ -143,7 +146,7 @@ def main() -> int:
 
 
 def _run(args, cfg, py, grasp_dir, stop, log_file, log, run, go_on, load, plants) -> int:
-    done, prev = 0, None  # prev: (cell, free holes before) of the last cycle, to check it
+    done = 0
     sim_removed, sim_taken = set(), set()
     discs_left = [args.dry_run_discs]
     failed = {}  # cell -> what was around it when its plan last failed
@@ -209,16 +212,24 @@ def _run(args, cfg, py, grasp_dir, stop, log_file, log, run, go_on, load, plants
         return chosen, no_place, False
 
     bg = None  # the next plant planned in the background while the arm moves the current one
-    skipped_last = False  # the last plant left after its close-up (no plan): back to the overview without asking
+    located, placed, end_check = False, [], False
+
+    def write_json(path, d):  # whole or not at all (planning processes may be reading it)
+        import os
+
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(d, indent=1))
+        os.replace(tmp, path)
+
     while True:
         if stop.exists():
             print("STOPPED on request")
             break
-        if not args.dry_run:
-            if prev is None and not skipped_last and not go_on("回总览位，拍照定位托盘和圆盘"):
+        if not args.dry_run and not located:
+            if not go_on("回总览位，拍照定位托盘和圆盘"):
                 break
-            print(">>> overview and locate", flush=True)
-            skipped_last = False
+            print(">>> overview and locate (once for the run)", flush=True)
+            located = True
             if run(["scripts/68_goto_overview.py"])[0] != 0:
                 print("cannot go to the overview pose: stopped")
                 break
@@ -237,20 +248,6 @@ def _run(args, cfg, py, grasp_dir, stop, log_file, log, run, go_on, load, plants
             break
         free = [h for h in disc.get("free_holes", []) if h not in sim_taken]
         todo = [k for k in plants(grid) if k not in sim_removed and k not in args.skip.split(",")]
-        if prev is not None and not args.dry_run:
-            cell, free_before, hole_ = prev
-            ok_cell = cell not in grid.get("occupied", [])
-            # the hole it went into is no longer free (not the number of free holes: one photo may miss a hole the
-            # other sees, 2026-11-05: 4 holes seen before, 5 after, C9 in H1 judged not placed)
-            ok_hole = hole_ not in free
-            log["rounds"][-1]["check"] = {"cell_empty": ok_cell, "hole_taken": ok_hole}
-            if ok_cell and ok_hole:
-                done += 1
-                print(f"CHECK ok: {cell} is empty and a hole was taken ({done} transplanted)")
-            else:
-                print(f"CHECK FAILED for {cell}: cell empty {ok_cell}, H{hole_} taken {ok_hole}: stopped "
-                      "(the plant may have slipped; please look)")
-                break
         # what a flat hand in a natural posture can reach at all (seedling.feasibility: a few IK solutions, seconds):
         # told before anything moves, with what to change; those plants / holes are not planned
         from seedling.feasibility import check_layout
@@ -272,6 +269,7 @@ def _run(args, cfg, py, grasp_dir, stop, log_file, log, run, go_on, load, plants
             free = [h for h in free if h not in bad_h]
             if not todo or not free:
                 print("nothing can be done in this layout: change it as suggested above")
+                end_check = True
                 break
         print(f"free holes {free}; plants left (nearest first) {todo}")
         if not free and args.dry_run and todo and discs_left[0] > 1:
@@ -281,9 +279,11 @@ def _run(args, cfg, py, grasp_dir, stop, log_file, log, run, go_on, load, plants
             print(f"DISC FULL: (dry run) an empty disc in its place, {discs_left[0]} left")
         if not free:
             print("DISC FULL")
+            end_check = True
             break
         if done >= args.max_plants:
             print(f"{done} plants done (--max-plants)")
+            end_check = True
             break
         # the plan made in the background while the last plant was being moved (for the predicted state: that plant
         # gone, its hole taken), when the state is as predicted
@@ -303,6 +303,7 @@ def _run(args, cfg, py, grasp_dir, stop, log_file, log, run, go_on, load, plants
                 return 1
         if chosen is None:
             print("no plant left that can be grasped and placed safely: stopped")
+            end_check = True
             if no_place:
                 print(f"({len(no_place)} could be grasped but no free hole reached: the disc may be too close to the robot; "
                       "about 0.65 m from the base worked on 2026-10-28)")
@@ -353,7 +354,7 @@ def _run(args, cfg, py, grasp_dir, stop, log_file, log, run, go_on, load, plants
 
             bg["thread"] = threading.Thread(target=bg_plan, daemon=True)
             bg["thread"].start()
-        rc, _ = run(["scripts/69_pick_cycle.py", "--cell", k, "--lift-mm", str(args.lift_mm), "--place", str(hole),
+        rc, _ = run(["scripts/69_pick_cycle.py", "--cell", k, "--lift-mm", str(args.lift_mm), "--place", str(hole), "--no-return",
                      "--pitch-deg", *map(str, pitch_list)])
         if rc == 3:
             # its plan failed after the close-up, nothing touched: left for now (planned again when something around
@@ -363,15 +364,44 @@ def _run(args, cfg, py, grasp_dir, stop, log_file, log, run, go_on, load, plants
             if bg is not None:
                 bg["thread"].join()
                 bg = None  # planned for {k} gone: does not fit
-            prev, skipped_last = None, True
             continue
         if rc != 0:
             print(f"the cycle for {k} stopped (exit {rc}): stopped here, the arm is where that step left it")
             break
-        prev = (k, free, hole)
+        # done: the state updated without looking again (the tray and disc stay where they are): its cell empty, its
+        # hole taken, in the files the planning scripts read
+        done += 1
+        placed.append((k, hole))
+        sim_removed.add(k)
+        sim_taken.add(hole)
+        gf = PROJECT_DIR / cfg["tray"]["grid_file"]
+        g_ = json.loads(gf.read_text())
+        for key_ in ("occupied", "planted"):
+            if key_ in g_:
+                g_[key_] = [x for x in g_[key_] if x != k]
+        write_json(gf, g_)
+        df_ = PROJECT_DIR / "calibration" / "disc.json"
+        d_ = json.loads(df_.read_text())
+        d_["free_holes"] = [h for h in d_.get("free_holes", []) if h != hole]
+        write_json(df_, d_)
+        print(f"{k} -> H{hole} done ({done}); straight on (not located again)", flush=True)
+    # one picture at the end: every plant moved must have left its cell and be in its hole
+    if end_check and placed and not args.dry_run and not stop.exists():
+        print(">>> back to the overview, one picture to check", flush=True)
+        if run(["scripts/68_goto_overview.py", "--after-place", placed[-1][0]])[0] == 0:
+            rc, out = run(["scripts/60_tray_locate.py"], quiet=True)
+            grid, disc = load()
+            if rc == 0 and disc.get("ok") and disc.get("ok_last_picture") is not False:
+                for k, hole in placed:
+                    ok_cell, ok_hole = k not in grid.get("occupied", []), hole not in disc.get("free_holes", [])
+                    print(f"CHECK {'ok' if ok_cell and ok_hole else 'FAILED'}: {k} -> H{hole}: cell empty {ok_cell}, hole taken {ok_hole}")
+            else:
+                print("CHECK: the tray or the disc was not located on the last picture; please look")
+        else:
+            print("CHECK: cannot go to the overview pose; please look")
     log["done"] = done
     log_file.write_text(json.dumps(log, indent=1))
-    print(f"TRANSPLANT RUN END: {done} plants {'planned' if args.dry_run else 'transplanted and checked'}; log {log_file.relative_to(PROJECT_DIR)}")
+    print(f"TRANSPLANT RUN END: {done} plants {'planned' if args.dry_run else 'transplanted'}; log {log_file.relative_to(PROJECT_DIR)}")
     return 0
 
 

@@ -61,6 +61,8 @@ def main() -> int:
     ap.add_argument("--self-clearance-mm", type=float, default=90.0, help="hand from the arm's own upper arm and forearm (see 65)")
     ap.add_argument("--path-time-s", type=float, default=12.0, help="random-tree path search time for the carry across (all holes "
                     "and headings together; each search at most a quarter of it), when no straight or one-via path is safe")
+    ap.add_argument("--max-tilt-deg", type=float, default=5.0, help="while the plant is held, the hand at most this far from flat "
+                    "(fingers level) everywhere on the way, between waypoints too (seedlings break: 2026-11-05 the carry tipped it up to 90 deg)")
     ap.add_argument("--dynamics", type=float, default=None, help="one factor for all moves (default: robot.dynamics / fine_dynamics in the config)")
     args = ap.parse_args()
     cfg = config_from_args(args)
@@ -179,7 +181,7 @@ def main() -> int:
         z_up = max(tray_top + args.transit_mm / 1000 + below, G_of(q_lift)[2, 3])
         T_up = G_of(q_lift).copy()
         T_up[2, 3] = z_up
-        up_pcs, why = cartesian.chain(q_lift, [("up", T_up)], F, G, margin)
+        up_pcs, why = cartesian.chain(q_lift, [("up", T_up)], F, G, margin, max_tilt=args.max_tilt_deg)
         if up_pcs is None:
             print(f"not reachable: straight up from the lift pose ({why})")
             place_file.write_text(json.dumps({"cell": args.cell, "safe": False}))
@@ -191,6 +193,25 @@ def main() -> int:
             place_file.write_text(json.dumps({"cell": args.cell, "safe": False}))
             return 1
         q_up = up_pcs[0][1][-1]
+
+        T_upG = G_of(q_up)
+
+        def carry_flat(T_ac, z_hi):
+            """the carry as straight moves of a flat hand (it only turns about the vertical, so the plant stays upright):
+            (joints above the hole, waypoints) or None. Tried: moving and turning together; turning first (in place),
+            then moving; moving first, then turning above the hole"""
+            p_hi = np.array([T_ac[0, 3], T_ac[1, 3], z_hi])
+            down = [("carry down", T_ac)] if z_hi > T_ac[2, 3] + 1e-3 else []
+            routes = [[("carry", make_T(T_ac[:3, :3], p_hi))] + down,
+                      [("turn", make_T(T_ac[:3, :3], T_upG[:3, 3])), ("carry", make_T(T_ac[:3, :3], p_hi))] + down,
+                      [("carry", make_T(T_upG[:3, :3], p_hi)), ("turn", make_T(T_ac[:3, :3], p_hi))] + down]
+            for r_ in routes:
+                # high over everything: the hand may leave the straight line by up to 3 cm between waypoints (fewer stops;
+                # every executed piece is still checked against everything, and kept flat)
+                pcs_, _w = cartesian.chain(q_up, r_, F, G, margin, max_dev_m=0.03, max_tilt=args.max_tilt_deg)
+                if pcs_ is not None:
+                    return pcs_[-1][1][-1], [w for p_ in pcs_ for w in p_[2]]
+            return None
 
         def plan_hole(hi, dyaw, raise_m):
             """(plan dict, lines) or (None, why) for hole hi at hand heading dyaw, letting go raise_m higher"""
@@ -215,26 +236,37 @@ def main() -> int:
                 pc_ = cartesian.posture_cost(q_, hxy)
                 if pc_ <= max_posture and w_carry.ok(q_, plug=False):
                     cands.append((float(np.abs(q_ - q_up).max()), pc_, q_))
-            if not cands:
-                return None, [f"H{hi + 1}: no joint solution clear at the release pose"]
             cands.sort(key=lambda c_: c_[:2])
+            # first the carry as straight moves of a flat hand from the up pose, the way in from where it ends; then the
+            # release poses (the way up from each worked out backwards) with a carry path that keeps the hand flat
+            starts = []
+            cf = carry_flat(T_ac, max(T_upG[2, 3], z_carry))
+            if cf is not None:
+                starts.append((cf[0], cf[1], None))
+            starts += [(None, None, c_) for c_ in cands[:args.max_branches]]
+            if not starts:
+                return None, [f"H{hi + 1}: no joint solution clear at the release pose"]
             why_ = []
-            for _, pc_, q_rel in cands[:args.max_branches]:
+            for q_ac, carry_wps, cand_ in starts:
                 if _t.time() > deadline:
                     why_.append(f"H{hi + 1}: planning time used up (--time-budget-s {args.time_budget_s:.0f})")
                     break
-                steps_up = ([("above", pose(hxy, z_above + raise_m, dyaw))] if z_carry > z_above + raise_m + 1e-3 else []) + [("carry height", T_ac)]
-                bk, w0 = cartesian.chain(q_rel, steps_up, F, G, margin)
-                if bk is None:
-                    why_.append(f"H{hi + 1}: {w0}")
-                    continue
-                q_ac = bk[-1][1][-1]
+                if cand_ is not None:
+                    _, pc_, q_rel = cand_
+                    steps_up = ([("above", pose(hxy, z_above + raise_m, dyaw))] if z_carry > z_above + raise_m + 1e-3 else []) + [("carry height", T_ac)]
+                    bk, w0 = cartesian.chain(q_rel, steps_up, F, G, margin)
+                    if bk is None:
+                        why_.append(f"H{hi + 1}: {w0}")
+                        continue
+                    q_ac = bk[-1][1][-1]
+                else:
+                    pc_ = cartesian.posture_cost(q_ac, hxy)
                 if not w_carry.ok(q_ac):
                     why_.append(f"H{hi + 1}: the pose above the hole is not clear")
                     continue
                 # down into the hole, as executed (from above; the same joints as worked out backwards, within mm)
                 steps_in = ([("above", pose(hxy, z_above + raise_m, dyaw))] if z_carry > z_above + raise_m + 1e-3 else []) + [("insert", T_ins)]
-                pin_, w1 = cartesian.chain(q_ac, steps_in, F, G, margin)
+                pin_, w1 = cartesian.chain(q_ac, steps_in, F, G, margin, max_tilt=args.max_tilt_deg)
                 if pin_ is None:
                     why_.append(f"H{hi + 1}: {w1}")
                     continue
@@ -265,16 +297,27 @@ def main() -> int:
                     continue
                 # the carry from the up pose to above the hole: a path in the world with the plug (straight, else OMPL),
                 # staying near natural postures (no more than 15 deg more twisted than its ends)
-                band = max(cartesian.posture_cost(q_up, G_of(q_up)[:2, 3]), pc_) + 15.0
+                if carry_wps is not None:
+                    path = carry_wps
+                    o_, l_c = piece_lines("carry", q_up, path, w_carry)
+                    if not o_:
+                        bad = [ln for ln in l_c if "TOO LOW" in ln]
+                        why_.append(f"H{hi + 1}: flat carry {bad[0].strip()}")
+                        continue
+                else:
+                    band = max(cartesian.posture_cost(q_up, G_of(q_up)[:2, 3]), pc_) + 15.0
 
-                def valid(q_, band=band):
-                    return cartesian.posture_cost(q_, G_of(q_)[:2, 3]) <= band and w_carry.ok(q_)
+                    def valid(q_, band=band):
+                        return (cartesian.tilt_deg(q_, F, G) <= args.max_tilt_deg
+                                and cartesian.posture_cost(q_, G_of(q_)[:2, 3]) <= band and w_carry.ok(q_))
 
-                path = plan_path(q_up, q_ac, valid, time_s=1.0)  # the straight joint move at height first (plan_path does)
-                if path is None:
-                    why_.append(f"H{hi + 1}: no safe carry path to above the hole")
-                    continue
-                o_, l_c = piece_lines("carry", q_up, path, w_carry)
+                    path = plan_path(q_up, q_ac, valid, time_s=1.0)  # the straight joint move at height first (plan_path does)
+                    if path is None:
+                        why_.append(f"H{hi + 1}: no safe carry path to above the hole with the hand kept flat")
+                        continue
+                    o_, l_c = piece_lines("carry", q_up, path, w_carry)
+                tl = max(cartesian.max_tilt_between(a_, b_, F, G) for a_, b_ in zip([q_up] + list(path[:-1]), path))
+                l_c.append(f"  carry     : the hand at most {tl:.1f} deg from flat (limit {args.max_tilt_deg:g})")
                 # the way back to the overview after letting go (as 68 will plan it)
                 back_steps, back_msg = lift_then_plan(qa_, q_ov, w_after, cfg, lifts_m=(0.0, 0.10), time_s=2.0)
                 if back_steps is None:

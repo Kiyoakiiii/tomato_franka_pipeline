@@ -32,6 +32,8 @@ def main() -> int:
     ap.add_argument("--lift-mm", type=float, default=60.0)
     ap.add_argument("--put-back", action="store_true", help="after lifting, put the plant back and let go")
     ap.add_argument("--pitch-deg", type=float, nargs="+", default=None, help="grasp pitches to try (65 plan; default from the config)")
+    ap.add_argument("--no-return", action="store_true", help="after placing, stay above the disc (72 goes straight on to the next "
+                    "plant's observation pose; the tray and disc are located once per run)")
     ap.add_argument("--hold-s", type=float, default=0.5, help="pause at the top of the lift (2 s until 2026-11-02)")
     ap.add_argument("--place", type=int, nargs="?", const=0, default=None, metavar="HOLE",
                     help="transplant: put the plant into this disc hole (1..6; no number: the planner's choice)")
@@ -57,8 +59,9 @@ def main() -> int:
         steps += [("carry to the disc", ["scripts/71_place_in_disc.py", "carry", *c]),
                   ("insert into the hole", ["scripts/71_place_in_disc.py", "insert", *c]),
                   ("open", ["scripts/66_gripper.py", "open"]),
-                  ("retreat", ["scripts/71_place_in_disc.py", "retreat", *c]),
-                  ("back to the overview", ["scripts/68_goto_overview.py", "--after-place", args.cell])]
+                  ("retreat", ["scripts/71_place_in_disc.py", "retreat", *c])]
+        if not args.no_return:
+            steps += [("back to the overview", ["scripts/68_goto_overview.py", "--after-place", args.cell])]
     elif args.put_back:
         steps += [("put back", ["scripts/65_side_grasp.py", "lower", *c]),
                   ("open", ["scripts/66_gripper.py", "open"]),

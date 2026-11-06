@@ -197,30 +197,50 @@ def main() -> int:
 
         c = np.array(grid["cells"][args.cell], float)
         pl = None
-        # the observation pose worked out when this plant was chosen (72: 65 plan --from-observe), from this same pose
+        # the observation pose is always worked out as from the overview pose (as when the plant was chosen: 72, 65 plan
+        # --from-observe), whatever the arm comes from (72 goes from one plant's hole straight to the next plant,
+        # 2026-11-05); the way there from where the arm is is planned below
+        q_ref = np.array(cfg["tray"]["overview_q"], float)
         if plan_file.exists():
             try:
                 old_ = json.loads(plan_file.read_text())
-                if ("observe_q" in old_ and float(np.degrees(np.abs(np.array(old_["observe_from"]) - q_now)).max()) < 0.5
+                if ("observe_q" in old_ and float(np.degrees(np.abs(np.array(old_["observe_from"]) - q_ref)).max()) < 0.5
                         and np.linalg.norm(np.array(old_["observe_cell_xyz"]) - np.array(grid["cells"][args.cell], float)) < 0.003):
                     from seedling.wrist import ObservationPlan, path_clearance
 
                     q_o = np.array(old_["observe_q"])
-                    z_, part_ = path_clearance(q_now, q_o, T_FC, cfg)
+                    z_, part_ = path_clearance(q_ref, q_o, T_FC, cfg)
                     pl = ObservationPlan(True, q_o, None, old_["observe_desc"] + " (worked out when the plant was chosen)",
-                                         float(np.degrees(np.abs(q_o - q_now)).max()), z_, part_)
+                                         float(np.degrees(np.abs(q_o - q_ref)).max()), z_, part_)
             except Exception:  # noqa: BLE001
                 pl = None
         if pl is None:
-            pl = observe_pose(q_now)
+            pl = observe_pose(q_ref)
         if not pl.ok:
             print("no safe observation pose:", pl.tried[-3:])
             return None
         print(f"{tag}: observation pose {pl.desc}, max joint change {pl.max_joint_step_deg:.0f} deg, lowest {pl.lowest_part} z={pl.lowest_z:.3f}")
-        r = robot.move_joints(pl.q, dynamics=args.dynamics, description=f"observe {args.cell}")
-        if not r.ok:
-            print("motion failed:", r.reason)
+        # from where the arm is (the overview, or just after letting go the last plant in the disc) to the observation
+        # pose: the straight joint move when it is clear of everything (seedling.world: the plants in the tray and in
+        # the disc too), else straight up first and a path (seedling.planner.lift_then_plan, as 68 does)
+        from seedling.planner import lift_then_plan
+        from seedling.world import World
+
+        disc_o = json.loads(disc_file.read_text()) if disc_file.exists() else None
+        taken_o = ([h for h in range(1, len(disc_o["holes"]) + 1) if h not in disc_o.get("free_holes", [])]
+                   if disc_o is not None and "holes" in disc_o else None)
+        w_o = World(cfg, T_FC, grid, disc_o, tray_plants=list(grid.get("planted") or grid.get("occupied", [])), taken_holes=taken_o)
+        steps_o, msg_o = lift_then_plan(robot.q(), pl.q, w_o, cfg, time_s=6.0)
+        if steps_o is None:
+            print(f"no safe way to the observation pose ({msg_o})")
             return None
+        if len(steps_o) > 1:
+            print(f"{tag}: to the observation pose {msg_o}, {len(steps_o)} moves")
+        for name_o, _qa, qb_o in steps_o:
+            r = robot.move_joints(qb_o, dynamics=args.dynamics, description=f"observe {args.cell}: {name_o}")
+            if not r.ok:
+                print("motion failed:", r.reason)
+                return None
         time.sleep(0.5)
         cam = ZedCamera(cfg)
         try:

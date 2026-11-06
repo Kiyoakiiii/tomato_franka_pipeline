@@ -38,10 +38,26 @@ def follow(q0: np.ndarray, poses_G: list[np.ndarray], F: np.ndarray, G: np.ndarr
     return out
 
 
+def tilt_deg(q: np.ndarray, F: np.ndarray, G: np.ndarray) -> float:
+    """how far the hand is from flat: the angle between the hand's x axis (vertical when the fingers are level: the
+    approach and the closing axis both horizontal) and the vertical, either way up"""
+    R = (kinematics.fk(np.asarray(q, float), F) @ G)[:3, :3]
+    return float(np.degrees(np.arccos(min(1.0, abs(float(R[2, 0]))))))
+
+
+def max_tilt_between(qa, qb, F, G, step_deg: float = 1.5) -> float:
+    """the largest tilt on the joint-space straight move qa -> qb, sampled every step_deg of the largest joint change"""
+    qa, qb = np.asarray(qa, float), np.asarray(qb, float)
+    n = max(3, int(np.ceil(np.degrees(np.abs(qb - qa).max()) / step_deg)) + 1)
+    return max(tilt_deg(qa + t * (qb - qa), F, G) for t in np.linspace(0, 1, n))
+
+
 def sparsify(q0: np.ndarray, qs: list[np.ndarray], poses_G: list[np.ndarray], F: np.ndarray, G: np.ndarray,
-             max_dev_m: float = 0.005) -> list[np.ndarray]:
+             max_dev_m: float = 0.005, max_tilt: float | None = None) -> list[np.ndarray]:
     """Fewest joint waypoints (from qs) such that the contact point of every joint-space straight piece stays within
-    max_dev_m of the straight line between its ends (one straight Cartesian piece per call)"""
+    max_dev_m of the straight line between its ends (one straight Cartesian piece per call), and, with max_tilt (deg),
+    the hand within that of flat all along (carrying a plant: the joint interpolation between two flat poses can tip
+    the hand far over, 2026-11-05: up to 90 deg)"""
     pts = [kinematics.fk(q0, F) @ G] + list(poses_G)
     allq = [np.asarray(q0, float)] + list(qs)
     p_a, p_b = pts[0][:3, 3], pts[-1][:3, 3]
@@ -62,7 +78,8 @@ def sparsify(q0: np.ndarray, qs: list[np.ndarray], poses_G: list[np.ndarray], F:
     out, i = [], 0
     while i < len(allq) - 1:
         j = len(allq) - 1
-        while j > i + 1 and dev(allq[i], allq[j]) > max_dev_m:
+        while j > i + 1 and (dev(allq[i], allq[j]) > max_dev_m
+                             or (max_tilt is not None and max_tilt_between(allq[i], allq[j], F, G) > max_tilt)):
             j -= 1
         out.append(allq[j])
         i = j
@@ -70,7 +87,7 @@ def sparsify(q0: np.ndarray, qs: list[np.ndarray], poses_G: list[np.ndarray], F:
 
 
 def chain(q0: np.ndarray, targets_G: list[tuple[str, np.ndarray]], F: np.ndarray, G: np.ndarray, margin: float,
-          max_dev_m: float = 0.005):
+          max_dev_m: float = 0.005, max_tilt: float | None = None):
     """Straight pieces from the current contact pose through the named target poses. Returns
     [(name, dense joints, waypoints), ...] (each piece's dense joints for checking, its waypoints for executing), or
     (None, reason)."""
@@ -82,7 +99,7 @@ def chain(q0: np.ndarray, targets_G: list[tuple[str, np.ndarray]], F: np.ndarray
         qs = follow(q, poses, F, G, margin)
         if qs is None:
             return None, f"{name}: no continuous joint solution along the straight line"
-        pieces.append((name, qs, sparsify(q, qs, poses, F, G, max_dev_m)))
+        pieces.append((name, qs, sparsify(q, qs, poses, F, G, max_dev_m, max_tilt)))
         q, T = qs[-1], Tt
     return pieces, ""
 
