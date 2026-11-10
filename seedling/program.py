@@ -77,6 +77,13 @@ class Program:
         self.F, self.G = flange_to_ee(cfg), ee_to_contact(cfg)
         self.margin = float(cfg["robot"]["ik_joint_margin_rad"])
         self.fwd = float(cfg["gripper"]["pin_brake"].get("close_forward_m", 0.0))
+        # the closing point's shift from the cell centre, [along the approach, along the closing axis] in mm (as 65)
+        self.side_off = np.array(cfg.get("grasp", {}).get("side_offset_mm", [0.0, 0.0]), float) / 1000.0
+        # where the stem sits in the closed hand: at the closing point, whatever offset the closing point was given (the
+        # pins clamp the stem where they meet: 2026-11-06 the fingers met past the stem and missed it; 10 mm back they
+        # caught it). The placement puts this point over the hole
+        self.hold_fwd = self.fwd
+        self.hold_across = 0.0
         self.tray_top, self.disc_top = float(grid["z_top"]), float(disc["z_top"])
         cells = np.array([v[:2] for v in grid["cells"].values()], float)
         ctr = cells.mean(0)
@@ -109,7 +116,8 @@ class Program:
         """the template's hand poses at this cell, approaching along yaw (default: the program's direction)"""
         R, a = flat_R(yaw) if yaw is not None else (self.R, self.a)
         c = self.grid["cells"][cell]
-        close = np.array([c[0], c[1], z_close])
+        across = np.array([np.sin(np.arctan2(a[1], a[0])), -np.cos(np.arctan2(a[1], a[0])), 0.0])
+        close = np.array([c[0], c[1], z_close]) + a * self.side_off[0] + across * self.side_off[1]
         grasp = close - a * self.fwd  # the open gap centre: the fingers swing forward onto the closing point
         pre = grasp - a * STANDOFF
         return {"close": close, "R": R, "yaw": float(yaw if yaw is not None else self.yaw), "grasp": make_T(R, grasp),
@@ -172,7 +180,7 @@ class Program:
         z_ins = self.disc_top + below + raise_m
 
         def at(z):
-            return make_T(R_h, np.array([hxy[0], hxy[1], z]) - a_h * self.fwd)
+            return make_T(R_h, np.array([hxy[0], hxy[1], z]) - a_h * self.hold_fwd - R_h[:, 1] * self.hold_across)
 
         T_ins = at(z_ins)
         T_back = make_T(R_h, T_ins[:3, 3] - a_h * BACK)

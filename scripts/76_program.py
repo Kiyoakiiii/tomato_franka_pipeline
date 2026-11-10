@@ -94,7 +94,7 @@ def main() -> int:
         key = (tuple(sorted(set(taken) | set(extra_taken))), tuple(plants if plants is not None else planted), held, stems)
         if key not in worlds:
             worlds[key] = World(cfg, T_FC, grid, disc, tray_plants=list(key[1]), taken_holes=list(key[0]),
-                                held_below_m=held, hold_forward_m=prog.fwd if held else 0.0,
+                                held_below_m=held, hold_forward_m=prog.hold_fwd if held else 0.0,
                                 overrides={"placed_plant_radius_mm": 10.0, "plant_clearance_mm": 5.0} if stems else None)
         return worlds[key]
 
@@ -235,7 +235,7 @@ def main() -> int:
 
                     grasped[0] = True
                     taken_b = [x for x in holes if x not in left_holes]
-                    below_k = float(r["close_point"][2] - r["soil_z"] + PLUG)
+                    below_k = float(r["close_point"][2] - r.get("soil_z_low", r["soil_z"]) + PLUG)
                     hh = prog.quick_holes(np.array(r["q"]["lift"]), below_k, world_disc(taken_b, stems=True), left_holes,
                                           prefer=prog.configs[ci]["hole_heading"] if prog.configs else None)
                     pl = "no hole a flat hand reaches from this grasp"
@@ -477,7 +477,11 @@ def soil_info(grid, cell, obs, tray_top, disagree=0.008, plug_dz=0.013, leafy_co
     cov = (obs or {}).get("leaf_cover")
     if sure and cov is not None and cov > leafy_cover:
         h = min(h, HEIGHT_LEAFY)
-    return {"soil": float(soil), "src": src, "sure": sure, "height": h}
+    # the plug's length below the held stem from the LOWEST soil reading: a plug taken shorter than it is hits the disc
+    # before the hand is down (2026-11-06: the close-ups read 13-16 mm above the overview, the higher was taken for the
+    # grasp, the plug was 20 mm longer than planned: every plant pushed onto the hole edge, one Cartesian reflex)
+    low = min(v for v in (z_near, z_ov, soil) if v is not None)
+    return {"soil": float(soil), "soil_low": float(low), "src": src, "sure": sure, "height": h}
 
 
 def finger_floor_fn(cfg, args, si, obs, T_FC):
@@ -639,12 +643,12 @@ def grasp_plan(prog, cell, cfg, grid, disc, q_start, planted, world_disc, check_
                 return "no safe turn from the observation pose to the stage"
             vias = list(path[:-1])
     yaw_rel = float(np.degrees((yaw - np.arctan2(c[1], c[0]) + np.pi) % (2 * np.pi) - np.pi))
-    plan = {"cell": cell, "close_point": P["close"].tolist(), "offset_mm": [0.0, 0.0], "R": P["R"].tolist(),
+    plan = {"cell": cell, "close_point": P["close"].tolist(), "offset_mm": (prog.side_off * 1000).round(1).tolist(), "R": P["R"].tolist(),
             "q": {"start": (q_start if q_start is not None else tpl["stage"]).tolist(), "stage": tpl["stage"].tolist(),
                   "pregrasp": tpl["pregrasp"].tolist(), "grasp": tpl["grasp"].tolist(), "lift": tpl["lift"].tolist()},
             "vias": [np.asarray(v).tolist() for v in vias],
             **{f"{n}_vias": [np.asarray(w).tolist() for w in wps[:-1]] for n, _q0, wps in tpl["pieces"]},
-            "z_close": round(float(z_close), 4), "tray_top": round(prog.tray_top, 4), "yaw": yaw, "soil_z": si["soil"],
+            "z_close": round(float(z_close), 4), "tray_top": round(prog.tray_top, 4), "yaw": yaw, "soil_z": si["soil"], "soil_z_low": si.get("soil_low", si["soil"]),
             **(obs_from or {}), "cell_xy": [float(v) for v in c[:2]], "program": True, "config": ci, "safe": True}
     if write:
         print(f"soil surface of {cell}: z {si['soil']:.3f} ({(si['soil'] - prog.tray_top) * 1000:+.0f} mm vs the tray top) from {si['src']}")
@@ -685,7 +689,7 @@ def grasp_for_place(prog, cell, cfg, grid, disc, q_start, planted, world_disc, c
                                ci=ci, variant=variant, stems=stems, turn_search=turn_search, taken_extra=extra_taken)
                 hh = {}
                 if not isinstance(r, str):
-                    below = float(r["close_point"][2] - r["soil_z"] + PLUG)
+                    below = float(r["close_point"][2] - r.get("soil_z_low", r["soil_z"]) + PLUG)
                     hh = prog.quick_holes(np.array(r["q"]["lift"]), below, world_disc(list(extra_taken), stems=True), list(holes),
                                           prefer=taught)
                 plans[h] = (r, hh, si_h)
@@ -705,7 +709,7 @@ def place_plan(prog, cell, hole, gp, left, world_disc, check_pieces, extra_taken
     from seedling.program import HEADINGS, MAX_TILT, PLUG
 
     q_lift = np.array(gp["q"]["lift"])
-    soil = gp.get("soil_z", gp["close_point"][2] - 0.035)
+    soil = gp.get("soil_z_low", gp.get("soil_z", gp["close_point"][2] - 0.035))  # the longest the plug may be
     below = float(gp["close_point"][2] - soil + PLUG)
     T_l = prog.G_of(q_lift)
     T_up = T_l.copy()

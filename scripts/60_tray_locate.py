@@ -64,7 +64,8 @@ def main() -> int:
     g = locate_tray(frame, T_BC, cfg, z_hint=z_hint) if args.method in ("auto", "grid") else None
     if g is not None:
         print("grid:", json.dumps(g.summary()))
-    if g is not None and g.ok and args.method == "auto":
+    def cross_check(g):
+        """the grid against the outline at its own top height: (accepted?, g); g corrected by whole cells if needed"""
         # cross-check: the outline (+ known pitch) is good to a few mm and cannot slip by whole cells; a grid
         # fit that disagrees by more than a third of a cell has locked onto the wrong cells (2026-10-22: one column)
         o = locate_tray_outline(frame, T_BC, int(m["rows"]), int(m["cols"]), cfg, pitch=float(m["pitch_m"]), top_z=g.z_top)
@@ -72,6 +73,7 @@ def main() -> int:
             d = np.array([np.linalg.norm(np.array(g.cells[k][:2]) - np.array(o["cells"][k][:2])) for k in g.cells])
             print(f"cross-check grid vs outline: median {np.median(d) * 1000:.1f} mm, max {d.max() * 1000:.1f} mm")
             pm = float(m["pitch_m"])
+            nr = nc = 0
             if np.median(d) > pm / 3:
                 # the grid is good to a mm but can slip by whole cells (it is periodic); the outline is good to ~1 cm and
                 # cannot: the grid moved by the whole number of cells that brings it onto the outline
@@ -81,18 +83,27 @@ def main() -> int:
                 nr, nc = np.round(np.linalg.solve(np.column_stack([vr, vc]), off)).astype(int)
                 moved = {k: [round(v[0] + nr * vr[0] + nc * vc[0], 4), round(v[1] + nr * vr[1] + nc * vc[1], 4), v[2]] for k, v in g.cells.items()}
                 d2 = np.array([np.linalg.norm(np.array(moved[k][:2]) - np.array(o["cells"][k][:2])) for k in moved])
-                if (nr or nc) and np.median(d2) <= pm / 3:
+                # the outline decides only the whole number of cells (its rims are uneven: 2026-11-06, a tray moved
+                # back 6 cm on its stand: the grid 2 rows off onto the stand, and after the 2-row move still 15 mm
+                # from the outline, just over a third of a cell: the run was stopped). Rounding is unambiguous while
+                # the rest is under half a cell. The grid keeps its own mm (a re-fit near the moved grid pulled it 15 mm toward the
+                # robot that day and the grasp missed: grasping goes by these coordinates)
+                if (nr or nc) and np.median(d2) < 0.45 * pm:
                     g.cells = moved
                     g.status = f"ok (grid moved by {nr:+d} rows, {nc:+d} columns onto the tray outline)"
-                    print(f"CORRECTED: the grid fit was {abs(nr)} row(s), {abs(nc)} column(s) off; moved onto the outline "
-                          f"(now median {np.median(d2) * 1000:.1f} mm from it)")
+                    print(f"CORRECTED: the grid fit was {abs(nr)} row(s), {abs(nc)} column(s) off; moved onto the outline"
+                          f" (now median {np.median(d2) * 1000:.1f} mm from it)")
                     d = d2
-            if np.median(d) > pm / 3:
+            if np.median(d) > (0.45 if (nr or nc) else 1 / 3) * pm:
                 g.ok, g.status = False, (f"grid fit and tray outline disagree by {np.median(d) * 1000:.0f} mm (about "
                                          f"{np.median(d) / float(m['pitch_m']):.1f} cells): grid locked onto the wrong cells")
                 print("REJECTED:", g.status)
         else:
             print("cross-check not possible:", o["status"])
+        return g.ok, g
+
+    if g is not None and g.ok and args.method == "auto":
+        _, g = cross_check(g)
     if g is None or (not g.ok and args.method == "auto"):  # outline as the fallback (printed as such)
         o = locate_tray_outline(frame, T_BC, int(m["rows"]), int(m["cols"]), cfg, pitch=float(m["pitch_m"]))
         print("outline:", json.dumps({k: v for k, v in o.items() if k != "cells"}, default=float))

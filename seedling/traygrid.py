@@ -407,7 +407,8 @@ def occupied_cells(frame: Frame, T_BC: np.ndarray, cells: dict, z_top: float, cf
 
 
 def locate_tray_outline(frame: Frame, T_BC: np.ndarray, rows: int, cols: int, cfg: dict, pitch: float | None = None,
-                        res: float = 0.002, min_step_m: float = 0.02, top_z: float | None = None) -> dict:
+                        res: float = 0.002, min_step_m: float = 0.02, top_z: float | None = None,
+                        top_band: tuple[float, float] = (-0.012, 0.10)) -> dict:
     """Tray from its outline only (works when every cell holds a plant and no cell or plug is visible): the
     dense points higher than the surface the tray stands on, without plant-green ones, form the tray's
     footprint; its minimum-area rectangle gives the corners, size and yaw; the cells divide the rectangle into
@@ -431,7 +432,7 @@ def locate_tray_outline(frame: Frame, T_BC: np.ndarray, rows: int, cols: int, cf
         # the tray top known (the grid fit): only the points at its top face (wall tops, rims, plugs), so a stand the
         # tray is raised on does not count as tray (2026-11-04: the stand made the outline 550 x 324 mm, the check
         # was skipped and a grid one row off went through)
-        high = (z > top_z - 0.012) & (z < top_z + 0.10) & ~G
+        high = (z > top_z + top_band[0]) & (z < top_z + top_band[1]) & ~G
     else:
         high = (z > support + min_step_m) & ~G
     Q = P[high]
