@@ -9,7 +9,7 @@ __pycache__/
 
 # data, model weights, experiment outputs (large; not code)
 data/
-models/
+# models/ is uploaded (35 MB, the weights the pipeline loads)
 experiments/
 calibration/sessions/
 archive/legacy_v0/captures/
@@ -17,3 +17,5 @@ archive/legacy_v0/captures/
 *.png
 *.jpg
 *.pt
+!models/*.pt
+!models/pretrained/*.pt

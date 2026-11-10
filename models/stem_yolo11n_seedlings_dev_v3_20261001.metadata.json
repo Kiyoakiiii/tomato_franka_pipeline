@@ -1,0 +1,253 @@
+{
+  "model": "models/stem_yolo11n_seedlings_dev_v3_20261001.pt",
+  "sha256": "f70164cdb9e5366805371507bf635cf24de08ee1701c19f5478afecc34f71a4a",
+  "status": "offline_development_candidate_requires_new_plant_validation",
+  "target": "foreground target main-stem segment in a single-plant work area",
+  "robot_execution_validated": false,
+  "independent_plant_test": false,
+  "copied_from": "experiments/vision/20261001_yolo11n_matched160/train/weights/best.pt",
+  "dataset": "data/curated/seedlings_dev_v3/data.yaml",
+  "dataset_manifest_sha256": "e52d0e9c8bf03c9f0d375900df34f1b16b72f42d6b7ddfbb6b36e5ab7a930a3a",
+  "training": {
+    "elapsed_s": 1798.9804510129616,
+    "budget_reached": false,
+    "low_gpu_memory_stop": false,
+    "low_host_memory_stop": false,
+    "epochs_logged": 160,
+    "last_epoch_may_be_partial": false,
+    "peak_rss_mib": 4126.76171875,
+    "gpu_peak_reserved_mib": 6728.0,
+    "best_weights": "/home/kevin/projects/tomato_franka_pipeline/experiments/vision/20261001_yolo11n_matched160/train/weights/best.pt",
+    "last_weights": "/home/kevin/projects/tomato_franka_pipeline/experiments/vision/20261001_yolo11n_matched160/train/weights/last.pt",
+    "development_metrics": {
+      "metrics/precision(B)": 0.8305820596009721,
+      "metrics/recall(B)": 0.8004926695402885,
+      "metrics/mAP50(B)": 0.8083600304625274,
+      "metrics/mAP50-95(B)": 0.43970051131562,
+      "metrics/precision(M)": 0.8798228578590336,
+      "metrics/recall(M)": 0.7755102040816326,
+      "metrics/mAP50(M)": 0.8477033545580235,
+      "metrics/mAP50-95(M)": 0.36400037902934895,
+      "fitness": 0.8037008903449689
+    },
+    "not_independent_test": true
+  },
+  "run_metadata": {
+    "purpose": "bounded 0 development training",
+    "not_independent_test": true,
+    "stage": "train",
+    "model": "/home/kevin/projects/tomato_franka_pipeline/models/pretrained/yolo11n-seg.pt",
+    "model_sha256": "55ed65c56c91713d23e8402371c6c49a6fd84f257f7dce452e8d70e41dcbe152",
+    "dataset_manifest_sha256": "e52d0e9c8bf03c9f0d375900df34f1b16b72f42d6b7ddfbb6b36e5ab7a930a3a",
+    "cpu_affinity": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "compute_device": "0",
+    "gpu_info": {
+      "name": "NVIDIA GeForce RTX 5060 Ti",
+      "free_bytes_at_start": 15606939648,
+      "total_bytes": 16611409920,
+      "allocator_fraction_limit": 0.7,
+      "training_target_active_fraction": 0.8,
+      "note": "Allocator cap excludes driver/context memory. Batch pauses approximate duty; not a hardware utilization quota."
+    },
+    "training_minutes_limit": 60.0,
+    "resource_profile": "shared80",
+    "resource_authorization": "User explicitly authorized up to 80% CPU/GPU on 2026-10-01",
+    "budget_note": "Training stops at a batch boundary; validation/checkpoint saving adds time.",
+    "started_utc": "2026-10-01T23:07:53.257345+00:00",
+    "config": {
+      "data": "/home/kevin/projects/tomato_franka_pipeline/data/curated/seedlings_dev_v3/data.yaml",
+      "epochs": 160,
+      "imgsz": 960,
+      "batch": 8,
+      "device": "0",
+      "workers": 0,
+      "cache": false,
+      "project": "/home/kevin/projects/tomato_franka_pipeline/experiments/vision/20261001_yolo11n_matched160",
+      "name": "train",
+      "exist_ok": false,
+      "seed": 42,
+      "deterministic": true,
+      "amp": true,
+      "plots": true,
+      "save": true,
+      "val": true,
+      "patience": 40,
+      "mask_ratio": 2,
+      "overlap_mask": true,
+      "optimizer": "AdamW",
+      "lr0": 0.001,
+      "lrf": 0.05,
+      "weight_decay": 0.0005,
+      "warmup_epochs": 3.0,
+      "warmup_bias_lr": 0.0,
+      "nbs": 16,
+      "cos_lr": true,
+      "mosaic": 0.0,
+      "mixup": 0.0,
+      "cutmix": 0.0,
+      "copy_paste": 0.0,
+      "degrees": 5.0,
+      "translate": 0.05,
+      "scale": 0.15,
+      "shear": 0.0,
+      "perspective": 0.0,
+      "fliplr": 0.5,
+      "flipud": 0.0,
+      "hsv_h": 0.01,
+      "hsv_s": 0.25,
+      "hsv_v": 0.2,
+      "close_mosaic": 0
+    },
+    "tool_sha256": {
+      "vision_runtime.py": "2c9ad35b6fe3edd5d58273f0bd93e56340bfaf2f730c796af89ff1dcc160c43a",
+      "train_stem_cpu.py": "206499711380141cf58b1324a5002344d96f2a277e5f52cdff9d37e2a290d890",
+      "train_stem_gpu.py": "5890ded44c68b2fe28be2c50cdf2b1a5775c72ef9eb916fcc9103175cd7c6042"
+    }
+  },
+  "resolved_training_settings": {
+    "optimizer": "AdamW",
+    "physical_batch": 8,
+    "target_accumulation_steps": 2,
+    "warmup_epochs": 3.0,
+    "warmup_bias_lr": 0.0,
+    "parameter_groups": [
+      {
+        "param_group": "weight",
+        "initial_lr": 0.001,
+        "lr": 0.001,
+        "weight_decay": 0.0005,
+        "betas": [
+          0.937,
+          0.999
+        ]
+      },
+      {
+        "param_group": "bn",
+        "initial_lr": 0.001,
+        "lr": 0.001,
+        "weight_decay": 0.0,
+        "betas": [
+          0.937,
+          0.999
+        ]
+      },
+      {
+        "param_group": "bias",
+        "initial_lr": 0.001,
+        "lr": 0.001,
+        "weight_decay": 0.0,
+        "betas": [
+          0.937,
+          0.999
+        ]
+      }
+    ]
+  },
+  "prediction_review": {
+    "weights": "/home/kevin/projects/tomato_franka_pipeline/experiments/vision/20261001_yolo11n_matched160/train/weights/best.pt",
+    "weights_sha256": "f70164cdb9e5366805371507bf635cf24de08ee1701c19f5478afecc34f71a4a",
+    "images": 49,
+    "input_size": 960,
+    "confidence_threshold": 0.25,
+    "compute_device": "cpu",
+    "retina_masks": true,
+    "max_det": 10,
+    "selection": "highest confidence; threshold fixed before examining pilot predictions",
+    "mean_selected_mask_iou": 0.6406374453917405,
+    "median_selected_mask_iou": 0.6974741120681313,
+    "no_detection_images": 2,
+    "iou_at_least_0_5_images": 41,
+    "multiple_detection_images": 11,
+    "capture_groups": [
+      {
+        "capture_group": "time_05",
+        "images": 9,
+        "mean_selected_mask_iou": 0.608908679776391,
+        "no_detection": 1
+      },
+      {
+        "capture_group": "time_07",
+        "images": 10,
+        "mean_selected_mask_iou": 0.6602663731805702,
+        "no_detection": 0
+      },
+      {
+        "capture_group": "time_12",
+        "images": 10,
+        "mean_selected_mask_iou": 0.7280515187439036,
+        "no_detection": 0
+      },
+      {
+        "capture_group": "time_15",
+        "images": 10,
+        "mean_selected_mask_iou": 0.6738654823165363,
+        "no_detection": 0
+      },
+      {
+        "capture_group": "time_18",
+        "images": 10,
+        "mean_selected_mask_iou": 0.5289222963797668,
+        "no_detection": 1
+      }
+    ],
+    "not_independent_test": true,
+    "limitations": "Capture groups are not verified plant IDs; only selected foreground segments are labeled. IoU is not grasp success or mAP.",
+    "threshold_diagnostics": [
+      {
+        "threshold": 0.05,
+        "mean_selected_mask_iou": 0.6406374453917405,
+        "no_detection_images": 0,
+        "iou_at_least_0_5_images": 41
+      },
+      {
+        "threshold": 0.1,
+        "mean_selected_mask_iou": 0.6406374453917405,
+        "no_detection_images": 0,
+        "iou_at_least_0_5_images": 41
+      },
+      {
+        "threshold": 0.25,
+        "mean_selected_mask_iou": 0.6406374453917405,
+        "no_detection_images": 2,
+        "iou_at_least_0_5_images": 41
+      },
+      {
+        "threshold": 0.4,
+        "mean_selected_mask_iou": 0.6112894443117803,
+        "no_detection_images": 4,
+        "iou_at_least_0_5_images": 39
+      },
+      {
+        "threshold": 0.5,
+        "mean_selected_mask_iou": 0.599788476692506,
+        "no_detection_images": 5,
+        "iou_at_least_0_5_images": 38
+      }
+    ],
+    "threshold_diagnostics_note": "Development diagnostics only; primary threshold remains 0.25. Highest-confidence mask selected without consulting the annotation."
+  },
+  "environment_freeze": "experiments/vision/20261001_yolo11n_matched160/environment.freeze.txt",
+  "environment_freeze_sha256": "c1910800f4966de5d991b9b0601adc4f1ad620a2b96896fc3e118a347de14796",
+  "limitations": [
+    "Capture groups are not confirmed plant identities; leakage may remain",
+    "Only selected foreground segments are labeled",
+    "No 3D localization, grasping or plant-damage result is implied"
+  ]
+}
