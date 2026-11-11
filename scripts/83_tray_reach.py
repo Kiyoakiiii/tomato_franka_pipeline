@@ -30,7 +30,7 @@ from seedling.config import PROJECT_DIR
 
 def evaluate(job):
     """one tray offset: {cell: (ok, grasp height above the soil mm, pitch, why)} in the job's order"""
-    cfg, grid, disc, (dr, dl, dz), ov = job
+    cfg, grid, disc, (dr, dl, dz), ov, disc_xy = job
     from types import SimpleNamespace
 
     from seedling.calibration import load_T_FC
@@ -53,7 +53,8 @@ def evaluate(job):
     g["occupied"] = g["planted"] = allc
     g["soil_z_overview"] = {k: g["z_top"] + 0.013 for k in allc}
     dd = json.loads(json.dumps(disc))
-    far = np.array([0.0, 3.0])  # the disc out of the way
+    # the disc out of the way, or (disc_xy) its centre there: then each plant grasped is also let go into an empty disc
+    far = np.array([0.0, 3.0]) if disc_xy is None else np.asarray(disc_xy, float) - np.asarray(dd["centre"][:2], float)
     dd["centre"] = (np.array(dd["centre"][:2]) + far).tolist()
     dd["holes"] = [(np.array(h[:2]) + far).tolist() for h in dd["holes"]]
     prog = Program(cfg, T_FC, g, dd)
@@ -114,13 +115,23 @@ def evaluate(job):
                         continue
                     h = (r["z_close"] - si["soil"]) * 1000
                     if best is None or h < best[0] - 0.5:
-                        best = (h, pitch, off)
+                        best = (h, pitch, off, r)
                     break  # the flattest that works for this seed
                 if best is not None and best[0] <= 17.5:
                     break
             if best is not None and best[0] <= 17.5:
                 break
-        out[k] = (best is not None, None if best is None else round(best[0]), None if best is None else best[1], "" if best else why)
+        placed = None
+        if best is not None and disc_xy is not None:
+            placed = False
+            for hole in range(1, len(dd["holes"]) + 1):
+                pl = m76.place_plan(prog, k, hole, best[3], [x for x in left if x != k], world_disc, check_pieces)
+                if not isinstance(pl, str):
+                    placed = True
+                    break
+                why = f"grasped, not let go into the disc: {pl}"
+        out[k] = (best is not None, None if best is None else round(best[0]), None if best is None else best[1],
+                  "" if best and placed is not False else why, placed)
         if best is not None:
             gone.append(k)  # taken; a cell that cannot be taken stays (and may block the ones behind it)
     return (dr, dl, dz), out
@@ -134,13 +145,16 @@ def main() -> int:
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--camera-self-clearance-mm", type=float, default=None, help="testing: the camera housing's clearance from the arm's "
                     "links 0-5 in the world model (default seedling.world, 25)")
+    ap.add_argument("--disc-xy", type=float, nargs=2, action="append", default=None, metavar=("X", "Y"),
+                    help="the disc's centre (m, base frame; repeatable): each plant also let go into an empty disc there")
     ap.add_argument("--grid", default=None, help="the tray record to start from (default: the last locate)")
     args = ap.parse_args()
     cfg = config_from_args(args)
     grid = json.loads((PROJECT_DIR / (args.grid or cfg["tray"]["grid_file"])).read_text())
     disc = json.loads((PROJECT_DIR / "calibration" / "disc.json").read_text())
     ov = {} if args.camera_self_clearance_mm is None else {"camera_self_clearance_mm": args.camera_self_clearance_mm}
-    jobs = [(cfg, grid, disc, (r, l, z), ov) for r in args.radial for l in args.lateral for z in args.up]
+    jobs = [(cfg, grid, disc, (r, l, z), ov, dxy) for r in args.radial for l in args.lateral for z in args.up
+            for dxy in (args.disc_xy or [None])]
     t0 = time.time()
     with ProcessPoolExecutor(max_workers=args.workers) as ex:
         res = list(ex.map(evaluate, jobs))
@@ -149,22 +163,25 @@ def main() -> int:
     a1 = np.array(grid["cells"]["A1"][:2])
     print(f"the tray as located (A1 at {np.round(a1, 3).tolist()}, top {grid['z_top']:.3f} m), moved; a full tray, every cell "
           f"grasped in the job's order and lifted to the carry height (placement not checked)")
-    for (dr, dl, dz), out in res:
+    for job, ((dr, dl, dz), out) in zip(jobs, res):
         n = sum(v[0] for v in out.values())
+        n_pl = sum(bool(v[4]) for v in out.values())
         hs = [v[1] for v in out.values() if v[0]]
         print(f"\nmoved {dr * 100:+.0f} cm away from the robot, {dl * 100:+.0f} cm to its left, {dz * 100:+.0f} cm up: "
-              f"{n}/{len(out)} cells" + (f"; grasp height above the soil mean {np.mean(hs):.0f} mm, max {max(hs)} mm" if hs else ""))
+              f"{n}/{len(out)} cells grasped" + (f", {n_pl} also let go into the disc at {job[5]}" if job[5] is not None else "")
+              + (f"; grasp height above the soil mean {np.mean(hs):.0f} mm, max {max(hs)} mm" if hs else ""))
         print("      " + " ".join(f"{c:>3d}" for c in cols))
         for r_ in rows:
             line = []
             for c in cols:
                 v = out.get(f"{r_}{c}")
-                line.append("  ." if v is None else (f"{v[1]:3d}" if v[0] else "  X"))
+                line.append("  ." if v is None else ("  X" if not v[0] else "  g" if v[4] is False else f"{v[1]:3d}"))
             print(f"   {r_}  " + " ".join(line))
-        fails = [(k, v[3]) for k, v in out.items() if not v[0]]
+        fails = [(k, v[3]) for k, v in out.items() if not v[0] or v[4] is False]
         for k, w in fails[:4]:
             print(f"   {k}: {w[:150]}")
-    print(f"\n(numbers: the closing point's height above the soil, mm; X: not grasped; {time.time() - t0:.0f} s)")
+    print(f"\n(numbers: the closing point's height above the soil, mm; X: not grasped; g: grasped but not let go into the disc; "
+          f"{time.time() - t0:.0f} s)")
     return 0
 
 

@@ -250,6 +250,8 @@ def main() -> int:
             # (per cell, uniformly in [lo, hi] from the seed): no camera
             import zlib
 
+            if os.environ.get("SEEDLING_SIM_REALTIME"):
+                time.sleep(0.5 + 0.35)  # settling, then 5 frames averaged (real time simulated)
             lo_, hi_, seed_ = os.environ["SEEDLING_SIM_SOIL_DZ"].split(",")
             u_ = (zlib.crc32(f"{args.cell}:{seed_}".encode()) % 10000) / 10000.0
             z_ov_ = (grid.get("soil_z_overview") or {}).get(args.cell) or tray_top + 0.013

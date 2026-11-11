@@ -45,6 +45,9 @@ def main() -> int:
     ap.add_argument("--soil-dz", type=float, nargs=2, default=[-0.005, 0.013], help="close-up soil minus overview soil (m)")
     ap.add_argument("--out", default=".tmp/sim_run.json")
     ap.add_argument("--tag", default="", help="a name for this simulation's sandboxes (.tmp/simruns_TAG; several at once)")
+    ap.add_argument("--layout", type=float, nargs=5, default=None, metavar=("TRAY_R", "TRAY_L", "TRAY_Z", "DISC_X", "DISC_Y"),
+                    help="one layout only: the tray moved (m, away from the robot / to its left / up) and the disc's centre at "
+                         "(x, y) in the base frame (scripts/83_tray_reach.py --disc-xy picks candidates)")
     ap.add_argument("--whole-tray", action="store_true",
                     help="every cell holds a plant; the run is repeated with an emptied disc (as if the full one were "
                          "swapped) until the tray is empty or a run places none: how much of a full tray the program empties")
@@ -69,6 +72,12 @@ def main() -> int:
     ud, ld = frame(base_disc["centre"])
     ut, lt = frame(np.mean([v[:2] for v in base_grid["cells"].values()], axis=0))
     layouts = [(0.0,) * 6]
+    if args.layout is not None:
+        tr_, tl_, tz_, dx_, dy_ = args.layout
+        dc = np.asarray(base_disc["centre"][:2], float)
+        dd_ = np.array([dx_, dy_]) - dc  # as radial / lateral offsets of the disc (its frame below)
+        layouts = [(float(dd_ @ ud), float(dd_ @ ld), 0.0, tr_, tl_, tz_)]
+        args.n = 1
     while len(layouts) < args.n:
         layouts.append(tuple(float(rng.uniform(*r)) for r in (args.disc_r, args.disc_l, args.disc_z, args.tray_r, args.tray_l, args.tray_z)))
     root = PROJECT_DIR / ".tmp" / ("simruns" + (f"_{args.tag}" if args.tag else ""))

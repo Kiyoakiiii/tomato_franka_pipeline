@@ -182,13 +182,20 @@ def main() -> int:
         if True:
             done, left_holes = [], list(holes)
             quick_mode = [False]  # set when a plant that can be grasped finds no hole left
-            for k in plants:
+            # plants found impossible by the earlier build with more plants around (the tray only empties) are put back to
+            # the end: published as decided for now (77 does not wait for them), worked out again after the others
+            # (2026-11-10, a full tray simulated: the same four impossible plants searched again at every new disc, up
+            # to 20 s each, and the run waited up to 210 s for the next plant)
+            queue, deferred = list(plants), set()
+            while queue:
+                k = queue.pop(0)
                 if not left_holes:
                     break
                 if k in prog.cell_prog:
                     # its program is known: which of the holes left it goes into (the plan, ~0.5 s)
                     r = grasp_plan(prog, k, cfg, grid, disc, None, [p for p in planted if p not in done], world_disc, check_pieces,
-                                   soil_info(grid, k, None, prog.tray_top), args, write=False, variant=prog.cell_prog[k],
+                                   dict(soil_info(grid, k, None, prog.tray_top), pitch_deg=float(prog.cell_prog[k].get("pitch_deg", 0.0))),
+                                   args, write=False, variant=prog.cell_prog[k],
                                    stems=[x for x in occupied if x not in done], taken_extra=[x for x in holes if x not in left_holes])
                     h_ok = None
                     if not isinstance(r, str):
@@ -213,6 +220,22 @@ def main() -> int:
                     save()
                     print(f"  {k}: no way (found before, with the same holes and plants left)")
                     continue
+                nb = no_way_before.get(k)
+
+                def near(cells_, k_=k):  # the plants within 2 cells of k: the ones that can block its grasp
+                    ck = np.array(grid["cells"][k_][:2], float)
+                    return sorted(x for x in cells_ if x != k_ and np.hypot(*(np.array(grid["cells"][x][:2], float) - ck)) < 0.10)
+
+                # put back only when nothing around it changed since (a plant blocked by its neighbours is worked out at
+                # once when they are gone: put back too, a whole third row waited behind four impossible plants)
+                if isinstance(nb, dict) and k not in deferred and set(stems) <= set(nb.get("plants", [])) \
+                        and near(stems) == near(nb.get("plants", [])):
+                    deferred.add(k)
+                    queue.append(k)
+                    no_way[k] = {"holes": list(left_holes), "plants": sorted(stems), "deferred": True}
+                    save()
+                    print(f"  {k}: no way last time; worked out again after the others", flush=True)
+                    continue
                 si_k = soil_info(grid, k, None, prog.tray_top)
                 found, why_k = None, []
                 grasped = [False]  # some variant grasps it (then failing means no hole left that a flat hand reaches)
@@ -235,15 +258,24 @@ def main() -> int:
                                                          world_disc, check_pieces, si_c, args, [h],
                                                          [p for p in planted if p not in done + [k]],
                                                          extra_taken=[x for x in holes if x not in left_holes], variant=variant, ci=ci,
-                                                         stems=stems, turn_search=False, z_nominal=z_nom)
+                                                         stems=stems, turn_search=bool(variant.get("turn_search")), z_nominal=z_nom)
                         if hole_c is None:
                             return False
                     return True
 
                 def try_variant(variant, ci=0, note=""):
-                    r = grasp_plan(prog, k, cfg, grid, disc, None, [p for p in planted if p not in done], world_disc, check_pieces,
-                                   si_k, args, write=False, ci=ci, variant=variant, stems=stems,
-                                   taken_extra=[x for x in holes if x not in left_holes])
+                    from seedling.program import GRASP_PITCHES
+
+                    # flat, else the hand pitched down (as the cycle plans it after the close-up: grasp_for_place; the far
+                    # row of a full tray had no flat grasp at all and was left, 2026-11-10 simulation)
+                    for p_ in (0.0,) + tuple(GRASP_PITCHES):
+                        r = grasp_plan(prog, k, cfg, grid, disc, None, [p for p in planted if p not in done], world_disc, check_pieces,
+                                       dict(si_k, pitch_deg=p_), args, write=False, ci=ci, variant=variant, stems=stems,
+                                       taken_extra=[x for x in holes if x not in left_holes])
+                        if not isinstance(r, str):
+                            if p_:
+                                note = note + f", pitched {p_:g} deg"
+                            break
                     if isinstance(r, str):
                         why_k.append(f"{note}: no grasp ({r})")
                         return None
@@ -275,25 +307,35 @@ def main() -> int:
                         # estimated height as the seed; the default template's seed was the taught grasp at another cell,
                         # and the joints found from the two differed: robust in the build, failing in the simulated run)
                         v_ = {"yaw": float(r["yaw"]), "q": np.array(r["q"]["grasp"]), "cap": float((variant or {}).get("cap", 0.035))}
-                        mode, q_obs = "none", None
-                        for q_from, m_ in ((np.array(r["q"]["stage"]), "near"), (None, "overview")):
-                            pl_o = observe_pose(cfg, grid, k, T_FC, prog.tray_top, q_from=q_from, near_only=(m_ == "overview"),
-                                                valid=obs_valid_for(taken_b, sorted(set(p for p in planted if p not in done) | {k})))
-                            if pl_o.ok and not isinstance(grasp_plan(prog, k, cfg, grid, disc, pl_o.q, [p for p in planted if p not in done],
-                                                                     world_disc, check_pieces, si_k, args, write=False, ci=ci,
-                                                                     variant=v_, stems=stems, turn_search=False, taken_extra=taken_b), str):
-                                mode, q_obs = m_, pl_o.q
+                        # (with the grasp's own pitch: checked flat, a plant found only pitched was refused here)
+                        si_v = dict(si_k, pitch_deg=float(r.get("pitch_deg", 0.0)))
+                        mode, q_obs, searched = "none", None, False
+                        # the standard turn from the observation pose first; if none, a planned turn (the path search
+                        # the cycle itself uses after the close-up, 76 grasp: up to 3 s, kept near the natural posture).
+                        # Checked with the standard turn only, plants the cycle does were refused and blocked the rows
+                        # behind them (2026-11-10, a full tray in real time: 55 of 72)
+                        for ts_ in (False, True):
+                            for q_from, m_ in ((np.array(r["q"]["stage"]), "near"), (None, "overview")):
+                                pl_o = observe_pose(cfg, grid, k, T_FC, prog.tray_top, q_from=q_from, near_only=(m_ == "overview"),
+                                                    valid=obs_valid_for(taken_b, sorted(set(p for p in planted if p not in done) | {k})))
+                                if pl_o.ok and not isinstance(grasp_plan(prog, k, cfg, grid, disc, pl_o.q, [p for p in planted if p not in done],
+                                                                         world_disc, check_pieces, si_v, args, write=False, ci=ci,
+                                                                         variant=v_, stems=stems, turn_search=ts_, taken_extra=taken_b), str):
+                                    mode, q_obs, searched = m_, pl_o.q, ts_
+                                    break
+                            if mode != "none":
                                 break
                         if mode == "none":
                             # no close-up: the cycle goes from the overview pose (69 --no-observe): the standard turn
                             # from there must work
                             if isinstance(grasp_plan(prog, k, cfg, grid, disc, np.array(cfg["tray"]["overview_q"], float),
-                                                     [p for p in planted if p not in done], world_disc, check_pieces, si_k, args,
+                                                     [p for p in planted if p not in done], world_disc, check_pieces, si_v, args,
                                                      write=False, ci=ci, variant=v_, stems=stems, turn_search=False,
                                                      taken_extra=taken_b), str):
                                 pl = "no observation pose, and no standard turn from the overview either"
                                 continue
                         v_["observe"] = mode
+                        v_["turn_search"] = searched
                         v_["observe_q"] = None if q_obs is None else np.asarray(q_obs)
                         v_["observe_desc"] = pl_o.desc if q_obs is not None else ""
                         rob = robust(v_, ci, q_obs, h, z_nom=float(r["z_close"])) if mode != "none" else True
@@ -346,10 +388,11 @@ def main() -> int:
                         quick_mode[0] = True
                     continue
                 h, r, note, v_ = found
+                no_way.pop(k, None)  # (a deferred plant found a way after all)
                 prog.cell_prog[k] = {"yaw": float(r["yaw"]), "q": np.array(r["q"]["grasp"]), "note": note,
                                      "cap": float(v_.get("cap", 0.035)), "observe": v_.get("observe", "near"),
                                      "observe_q": v_.get("observe_q"), "observe_desc": v_.get("observe_desc", ""), "hole": int(h),
-                                     "z_close": float(r["z_close"])}
+                                     "z_close": float(r["z_close"]), "pitch_deg": float(r.get("pitch_deg", 0.0))}
                 print(f"  {k} -> H{h}: {note}", flush=True)
                 done.append(k)
                 left_holes.remove(h)
@@ -379,7 +422,8 @@ def main() -> int:
                 pl = SimpleNamespace(ok=True, q=np.asarray(variant["observe_q"], float), desc=variant.get("observe_desc", "") + " (the program's)")
             else:
                 r0 = grasp_plan(prog, args.cell, cfg, grid, disc, None, planted, world_disc, check_pieces,
-                                soil_info(grid, args.cell, None, prog.tray_top), args, variant=variant,
+                                dict(soil_info(grid, args.cell, None, prog.tray_top), pitch_deg=float(variant.get("pitch_deg", 0.0))),
+                                args, variant=variant,
                                 stems=[k for k in occupied if k != args.cell])
                 q_near = np.array(r0["q"]["stage"]) if isinstance(r0, dict) else np.array(cfg["tray"]["overview_q"], float)
                 # as the program chose it: near its stage, or as from the overview
@@ -400,7 +444,9 @@ def main() -> int:
             robot_q = FrankyRobot(cfg, step_mode=False).q()
         obs_file = OUT / f"{args.cell}_observe.json"
         obs = json.loads(obs_file.read_text()) if obs_file.exists() and not args.from_observe else None
-        si = soil_info(grid, args.cell, obs, prog.tray_top)
+        # the hand pitched as the program found it (a plant found only pitched, checked flat when the run chose it, was
+        # refused there: 2026-11-10, a full tray in real time, 29 of 72); grasp_for_place below tries flat and pitched
+        si = dict(soil_info(grid, args.cell, obs, prog.tray_top), pitch_deg=float(variant.get("pitch_deg", 0.0)))
         if obs is not None:
             obs["soil_used"] = si["soil"]
             obs_file.write_text(json.dumps(obs, indent=1))

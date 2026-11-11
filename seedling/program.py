@@ -368,7 +368,8 @@ class Program:
                 "cells": {k: {"yaw": v["yaw"], "q": np.asarray(v["q"]).tolist(), "note": v.get("note", ""), "cap": v.get("cap", 0.035),
                               "observe": v.get("observe", "near"),
                               "observe_q": None if v.get("observe_q") is None else np.asarray(v["observe_q"]).tolist(),
-                              "observe_desc": v.get("observe_desc", ""), "hole": v.get("hole"), "z_close": v.get("z_close")}
+                              "observe_desc": v.get("observe_desc", ""), "hole": v.get("hole"), "z_close": v.get("z_close"),
+                              "pitch_deg": float(v.get("pitch_deg", 0.0))}
                           for k, v in self.cell_prog.items()},
                 "configs": [{"q_ref": c["q_ref"].tolist(), "ref_T": np.asarray(c["ref_T"]).tolist(), "ref": c["ref"],
                              "posture": float(c["posture"]), "cells": c["cells"],
@@ -381,7 +382,8 @@ class Program:
         self.cell_prog = {k: {"yaw": float(v["yaw"]), "q": np.array(v["q"]), "note": v.get("note", ""), "cap": float(v.get("cap", 0.035)),
                               "observe": v.get("observe", "near"),
                               "observe_q": None if v.get("observe_q") is None else np.array(v["observe_q"]),
-                              "observe_desc": v.get("observe_desc", ""), "hole": v.get("hole"), "z_close": v.get("z_close")}
+                              "observe_desc": v.get("observe_desc", ""), "hole": v.get("hole"), "z_close": v.get("z_close"),
+                              "pitch_deg": float(v.get("pitch_deg", 0.0))}
                           for k, v in d.get("cells", {}).items()}
         self.configs = [{"q_ref": np.array(c["q_ref"]), "ref_T": np.array(c["ref_T"]), "ref": c["ref"], "posture": c["posture"],
                          "cells": list(c["cells"]), "hole_heading": {int(k): float(v) for k, v in c["hole_heading"].items()}}

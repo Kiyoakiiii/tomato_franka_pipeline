@@ -141,6 +141,35 @@ class PlanningOnlyRobot(RobotBase):
 STATE_ENV = "SEEDLING_SIM_STATE"
 
 
+FR3_VMAX = np.array([2.62, 2.62, 2.62, 2.62, 5.26, 4.18, 5.26])  # rad/s (Franka's FR3 joint limits)
+FR3_AMAX = np.full(7, 10.0)    # rad/s^2
+FR3_JMAX = np.full(7, 5000.0)  # rad/s^3
+
+
+def estimate_move_s(qa, qb, dyn) -> float:
+    """how long a joint move takes: per joint the shortest jerk-limited profile from rest to rest with the FR3 limits times
+    the dynamics factors (velocity, acceleration, jerk), the slowest joint deciding (the motion generator synchronises
+    them). An estimate for simulating a run in real time, not the controller's exact profile."""
+    v, a, j = (float(dyn),) * 3 if np.isscalar(dyn) else map(float, dyn)
+
+    def t_ramp(vp, am, jm):  # time from rest to vp
+        return vp / am + am / jm if vp >= am * am / jm else 2.0 * np.sqrt(vp / jm)
+
+    def t_1d(d, vm, am, jm):
+        if d <= 1e-9:
+            return 0.0
+        if d >= vm * t_ramp(vm, am, jm):
+            return d / vm + t_ramp(vm, am, jm)
+        lo, hi = 0.0, vm
+        for _ in range(50):
+            m = 0.5 * (lo + hi)
+            lo, hi = (m, hi) if m * t_ramp(m, am, jm) < d else (lo, m)
+        return 2.0 * t_ramp(lo, am, jm)
+
+    d = np.abs(np.asarray(qb, float) - np.asarray(qa, float))
+    return max(t_1d(di, vm * v, am * a, jm * j) for di, vm, am, jm in zip(d, FR3_VMAX, FR3_AMAX, FR3_JMAX))
+
+
 class StateSimRobot(RobotBase):
     """What FrankyRobot gives when SEEDLING_SIM_STATE names a JSON file (the whole-run simulation, scripts/80): the
     joints live in that file, so the processes of a run (77 -> 69 -> 65 / 71 / 68) see one arm. Every joint move is
@@ -185,6 +214,12 @@ class StateSimRobot(RobotBase):
         q = np.asarray(q, float).reshape(7)
         st = self._load()
         qa = np.array(st["q"], float)
+        if os.environ.get("SEEDLING_SIM_REALTIME"):  # the move takes as long as it would on the arm
+            import time as _t
+
+            d_ = self.cfg_["robot"]["dynamics"] if dynamics is None else (
+                self.cfg_["robot"]["fine_dynamics"] if isinstance(dynamics, str) else dynamics)
+            _t.sleep(estimate_move_s(qa, q, d_))
         if os.environ.get("SEEDLING_SIM_NOCHECK"):  # profiling the program's own time: the move taken as it is
             st["q"] = q.tolist()
             json.dump(st, open(self.path, "w"))

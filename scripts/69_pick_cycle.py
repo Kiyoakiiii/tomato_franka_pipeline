@@ -108,6 +108,9 @@ def main() -> int:
         print(f">>> step {i}/{len(steps)}: {name}", flush=True)
         if sim and cmd[0] == "scripts/66_gripper.py":
             print("(simulated: no gripper)")
+            if os.environ.get("SEEDLING_SIM_REALTIME"):
+                time.sleep(1.2)  # the pin-brake gripper closes / opens in ~1.1 s (2026-10-15)
+            t_steps[name] = 1.2 if os.environ.get("SEEDLING_SIM_REALTIME") else 0.0
             continue
         t_s = time.time()
         rc = run_step(cmd)

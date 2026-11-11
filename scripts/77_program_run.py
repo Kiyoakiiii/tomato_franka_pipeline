@@ -122,6 +122,8 @@ def _run(args, cfg, gdir, stop, run, env_plan, sim=False, camera_ready=None) -> 
         camera_ready()
     if sim:
         rc, out = 0, "(simulated: the files as they are)"
+        if os.environ.get("SEEDLING_SIM_REALTIME"):
+            time.sleep(3.0)  # the overview picture and the locate (real time simulated)
     elif args.no_locate:
         g0 = json.loads(gf.read_text())
         age = (time.time() - gf.stat().st_mtime) / 60
@@ -227,6 +229,10 @@ def _run(args, cfg, gdir, stop, run, env_plan, sim=False, camera_ready=None) -> 
             else:
                 chosen = None
             if chosen is None:
+                chosen = choose(todo, free)
+            if chosen is None and build.poll() is None:
+                # plants put back by the build (impossible last time) may still find a way: its end waited for, once
+                build.wait()
                 chosen = choose(todo, free)
             if chosen is None:
                 print(f"no plant left the program takes into a free hole (plants {todo}, holes {free}): stopped")
