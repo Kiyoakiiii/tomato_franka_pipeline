@@ -168,6 +168,37 @@ def _jacobian(q: np.ndarray, target: np.ndarray, F_T_EE: np.ndarray, rot_weight:
     return J
 
 
+def _res_jac(q: np.ndarray, target: np.ndarray, F_T_EE: np.ndarray, rot_weight: float):
+    """_residual and _jacobian together from ONE pinocchio pass (the joint Jacobians' pass places the frames too: a
+    second forward-kinematics pass for the residual was a third of the IK's time, 2026-11-10); the two functions
+    separately without pinocchio"""
+    global _JCOLS
+    P = _pin()
+    if P is None:
+        return _residual(q, target, F_T_EE, rot_weight), _jacobian(q, target, F_T_EE, rot_weight)
+    pin, model, data, fid, jids = P
+    if _JCOLS is None:
+        _JCOLS = [model.joints[j].idx_v for j in jids]
+    pin.computeJointJacobians(model, data, np.asarray(q, dtype=float) + JOINT_OFFSETS)
+    pin.updateFramePlacements(model, data)
+    Mf = data.oMf[fid].homogeneous
+    T = Mf @ F_T_EE
+    J6 = pin.getFrameJacobian(model, data, fid, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)[:, _JCOLS]
+    rr = T[:3, 3] - Mf[:3, 3]
+    Jw = J6[3:]
+    Rt = target[:3, :3].T
+    J = np.empty((6, 7))
+    # the linear part: v at the EE point = v at the flange + w x r, i.e. J_lin - [r]x J_w (the cross product by rows)
+    J[0] = J6[0] - (rr[1] * Jw[2] - rr[2] * Jw[1])
+    J[1] = J6[1] - (rr[2] * Jw[0] - rr[0] * Jw[2])
+    J[2] = J6[2] - (rr[0] * Jw[1] - rr[1] * Jw[0])
+    J[3:] = rot_weight * (Rt @ Jw)
+    r = np.empty(6)
+    r[:3] = T[:3, 3] - target[:3, 3]
+    r[3:] = rot_weight * _rotvec(Rt @ T[:3, :3])
+    return r, J
+
+
 def _residual(q: np.ndarray, target: np.ndarray, F_T_EE: np.ndarray, rot_weight: float) -> np.ndarray:
     T = fk(q, F_T_EE)
     dp = T[:3, 3] - target[:3, 3]
@@ -231,29 +262,47 @@ def solve_ik(
 def _gn_pull(q, target, F_T_EE, rot_weight, q_prev, pull, lo, hi, iters: int = 60):
     """argmin |residual(x)|^2 + pull^2 |x - q_prev|^2 for lo <= x <= hi, from q: Gauss-Newton with the joints that sit
     on a limit and are pushed beyond it held there for the step (active set), steps <= 0.3 rad"""
-    x = np.clip(np.asarray(q, float), lo, hi)
+    # (the arithmetic of this loop is the IK's and so most of the planning time: the 7x7 system solved by LAPACK's
+    # Cholesky directly, H being positive definite, and no numpy wrapper per call; same steps as before, 2026-11-10)
+    x = np.minimum(np.maximum(np.asarray(q, float), lo), hi)
     P2 = pull * pull
     eps = 1e-9
+    lo_e, hi_e = lo + eps, hi - eps
+    reg = (P2 + 1e-9) * np.eye(7)
     for _ in range(iters):
-        r = _residual(x, target, F_T_EE, rot_weight)
-        J = _jacobian(x, target, F_T_EE, rot_weight)
+        r, J = _res_jac(x, target, F_T_EE, rot_weight)
         g = J.T @ r + P2 * (x - q_prev)
-        H = J.T @ J + (P2 + 1e-9) * np.eye(7)
-        free = ~(((x <= lo + eps) & (g > 0)) | ((x >= hi - eps) & (g < 0)))  # descent would leave the limit
+        H = J.T @ J + reg
+        free = ~(((x <= lo_e) & (g > 0)) | ((x >= hi_e) & (g < 0)))  # descent would leave the limit
         if free.all():
-            dx = -np.linalg.solve(H, g)
+            dx = -_spd_solve(H, g)
         else:
             dx = np.zeros(7)
             if free.any():
-                dx[free] = -np.linalg.solve(H[np.ix_(free, free)], g[free])
+                dx[free] = -_spd_solve(H[np.ix_(free, free)], g[free])
         s = float(np.abs(dx).max())
         if s > 0.3:
             dx *= 0.3 / s
-        xn = np.clip(x + dx, lo, hi)
+        xn = np.minimum(np.maximum(x + dx, lo), hi)
         if float(np.abs(xn - x).max()) < 1e-7:
             return xn
         x = xn
     return x
+
+
+try:
+    from scipy.linalg.lapack import dposv as _dposv
+except Exception:  # noqa: BLE001
+    _dposv = None
+
+
+def _spd_solve(H, g):
+    """H x = g for a symmetric positive definite H (LAPACK dposv; numpy's solve if that fails)"""
+    if _dposv is not None:
+        _c, x, info = _dposv(H, g)
+        if info == 0:
+            return x
+    return np.linalg.solve(H, g)
 
 
 def solve_ik_near(

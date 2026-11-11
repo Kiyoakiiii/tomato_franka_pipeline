@@ -185,6 +185,10 @@ class StateSimRobot(RobotBase):
         q = np.asarray(q, float).reshape(7)
         st = self._load()
         qa = np.array(st["q"], float)
+        if os.environ.get("SEEDLING_SIM_NOCHECK"):  # profiling the program's own time: the move taken as it is
+            st["q"] = q.tolist()
+            json.dump(st, open(self.path, "w"))
+            return MotionResult(True, "", False, 0.0)
         grid = json.loads((PROJECT_DIR / self.cfg_["tray"]["grid_file"]).read_text())
         df = PROJECT_DIR / "calibration" / "disc.json"
         disc = json.loads(df.read_text()) if df.exists() else None
@@ -192,7 +196,8 @@ class StateSimRobot(RobotBase):
         # at the plant the fingers and the plants are meant to touch: only rigid things and the arm itself are checked
         m, where = World(self.cfg_, T_FC, grid, disc).worst(qa, q, fingers=False, plants=False, plug=False)
         rec = {"description": description, "from": qa.tolist(), "to": q.tolist(), "margin_mm": round(m * 1000, 1), "where": where,
-               "max_joint_deg": round(float(np.degrees(np.abs(q - qa)).max()), 1)}
+               "max_joint_deg": round(float(np.degrees(np.abs(q - qa)).max()), 1),
+               "dynamics": "normal" if dynamics is None else ("fine" if isinstance(dynamics, str) else dynamics)}
         st.setdefault("log", []).append(rec)
         if m < -0.005:
             st["log"][-1]["failed"] = True
@@ -217,7 +222,14 @@ class StateSimRobot(RobotBase):
         pass
 
 
+SHARED_ENV = "SEEDLING_SHARED_ROBOT"  # set by a run that executes its steps in one process (77 / 69 --inproc)
+_SHARED: dict = {}
+
+
 class FrankyRobot(RobotBase):
+    """With SEEDLING_SHARED_ROBOT set, one connection for the whole process: the steps of a run executed in one process
+    (seedling.inproc) use the same franky.Robot instead of connecting again for every step (2026-11-10)."""
+
     def __new__(cls, *a, **k):
         import os
 
@@ -225,9 +237,17 @@ class FrankyRobot(RobotBase):
             return StateSimRobot(*a, **k)
         if os.environ.get(SIM_ENV):
             return PlanningOnlyRobot(*a, **k)
+        if os.environ.get(SHARED_ENV) and "robot" in _SHARED:
+            return _SHARED["robot"]
         return super().__new__(cls)
 
     def __init__(self, cfg: dict, step_mode: bool = True, confirm_fn=None):
+        import os
+
+        if getattr(self, "_connected", False):  # the shared connection: only the caller's settings
+            self.step_mode = step_mode
+            self.confirm_fn = confirm_fn or _console_confirm
+            return
         super().__init__(cfg, step_mode, confirm_fn)
         import franky
 
@@ -241,6 +261,9 @@ class FrankyRobot(RobotBase):
             f = float(self.rcfg["collision_force_n"])
             self.robot.set_collision_behavior([20.0] * 7, [f] * 6)
         self._check_ee_frame()
+        self._connected = True
+        if os.environ.get(SHARED_ENV):
+            _SHARED["robot"] = self
 
     MAX_DYNAMICS = 0.2  # hard cap on any motion's relative speed/acceleration/jerk
 

@@ -38,6 +38,8 @@ def main() -> int:
     ap.add_argument("--no-locate", action="store_true",
                     help="do not locate again: take the tray and the disc as the last locate left them (checked on its overlay "
                          "picture; the files keep track of the plants taken and the holes filled since)")
+    ap.add_argument("--subprocess", action="store_true", help="every step in a process of its own (as before 2026-11-10; "
+                    "default: the arm's steps in this process, the robot connected once)")
     args = ap.parse_args()
     cfg = config_from_args(args)
     py = sys.executable
@@ -47,6 +49,15 @@ def main() -> int:
         stop.unlink()
 
     def run(cmd, quiet=False, env=None):
+        """a step: (exit code, its output if quiet). The arm's steps (env None) in this process (seedling.inproc: loaded
+        and connected once); the planning ones (env: a planning-only robot, run in parallel) in their own processes"""
+        if env is None and not args.subprocess:
+            from seedling.inproc import run_script
+
+            argv = list(cmd[1:]) + (["--inproc"] if cmd[0] == "scripts/69_pick_cycle.py" else [])
+            if quiet:
+                return run_script(cmd[0], argv, quiet=True)
+            return run_script(cmd[0], argv), ""
         if quiet:
             r = subprocess.run([py, "-u", *cmd], cwd=PROJECT_DIR, capture_output=True, text=True, env=env)
             return r.returncode, r.stdout + r.stderr
@@ -58,6 +69,9 @@ def main() -> int:
     qf.parent.mkdir(exist_ok=True)
     qf.write_text(json.dumps({"q": cfg["tray"]["overview_q"]}))
     env_plan = dict(os.environ, SEEDLING_SIM_Q=str(qf))
+    from seedling.robot import SHARED_ENV
+
+    os.environ[SHARED_ENV] = "1"  # one robot connection for the run's steps in this process
 
     if os.environ.get("SEEDLING_SIM_STATE"):
         # the whole-run simulation (scripts/80): no camera, no robot; the tray and disc files as they are
@@ -68,16 +82,19 @@ def main() -> int:
     cam_log = open(cam_log_path, "w")
     cam_srv = subprocess.Popen([py, "-u", "scripts/63_camera_server.py", "--sock", str(sock)], cwd=PROJECT_DIR,
                                stdout=cam_log, stderr=subprocess.STDOUT, text=True)
-    t_end = time.time() + 30
-    while time.time() < t_end and cam_srv.poll() is None:
-        if "camera server ready" in cam_log_path.read_text(errors="replace"):
-            os.environ["SEEDLING_CAMERA_SOCK"] = str(sock)
-            break
-        time.sleep(0.2)
-    else:
+
+    def camera_ready():
+        """waited for only before the first picture: the camera opens while the arm goes to the overview pose"""
+        t_end = time.time() + 30
+        while time.time() < t_end and cam_srv.poll() is None:
+            if "camera server ready" in cam_log_path.read_text(errors="replace"):
+                os.environ["SEEDLING_CAMERA_SOCK"] = str(sock)
+                return
+            time.sleep(0.1)
         print("camera server did not start: the scripts open the camera themselves")
+
     try:
-        return _run(args, cfg, gdir, stop, run, env_plan)
+        return _run(args, cfg, gdir, stop, run, env_plan, camera_ready=camera_ready)
     finally:
         if cam_srv.poll() is None:
             cam_srv.terminate()
@@ -87,7 +104,7 @@ def main() -> int:
                 cam_srv.kill()
 
 
-def _run(args, cfg, gdir, stop, run, env_plan, sim=False) -> int:
+def _run(args, cfg, gdir, stop, run, env_plan, sim=False, camera_ready=None) -> int:
     from seedling.order import plant_order
 
     def write_json(path, d):
@@ -101,6 +118,8 @@ def _run(args, cfg, gdir, stop, run, env_plan, sim=False) -> int:
     if run(["scripts/68_goto_overview.py"])[0] != 0:
         print("cannot go to the overview pose: stopped")
         return 1
+    if camera_ready is not None:
+        camera_ready()
     if sim:
         rc, out = 0, "(simulated: the files as they are)"
     elif args.no_locate:

@@ -44,9 +44,19 @@ def main() -> int:
     ap.add_argument("--tray-z", type=float, nargs=2, default=[-0.03, 0.05])
     ap.add_argument("--soil-dz", type=float, nargs=2, default=[-0.005, 0.013], help="close-up soil minus overview soil (m)")
     ap.add_argument("--out", default=".tmp/sim_run.json")
+    ap.add_argument("--tag", default="", help="a name for this simulation's sandboxes (.tmp/simruns_TAG; several at once)")
+    ap.add_argument("--whole-tray", action="store_true",
+                    help="every cell holds a plant; the run is repeated with an emptied disc (as if the full one were "
+                         "swapped) until the tray is empty or a run places none: how much of a full tray the program empties")
     args = ap.parse_args()
     cfg = config_from_args(args)
     base_grid = json.loads((PROJECT_DIR / args.grid).read_text())
+    if args.whole_tray:
+        rng0 = np.random.default_rng(args.seed + 1000)
+        allc = sorted(base_grid["cells"])
+        base_grid["occupied"] = base_grid["planted"] = base_grid["green"] = allc
+        top = float(base_grid["z_top"])
+        base_grid["soil_z_overview"] = {k: round(top + float(rng0.uniform(0.004, 0.020)), 4) for k in allc}
     base_disc = json.loads((PROJECT_DIR / "calibration" / "disc.json").read_text())
     n_holes = len(base_disc["holes"])
     rng = np.random.default_rng(args.seed)
@@ -61,7 +71,7 @@ def main() -> int:
     layouts = [(0.0,) * 6]
     while len(layouts) < args.n:
         layouts.append(tuple(float(rng.uniform(*r)) for r in (args.disc_r, args.disc_l, args.disc_z, args.tray_r, args.tray_l, args.tray_z)))
-    root = PROJECT_DIR / ".tmp" / "simruns"
+    root = PROJECT_DIR / ".tmp" / ("simruns" + (f"_{args.tag}" if args.tag else ""))
     root.mkdir(parents=True, exist_ok=True)
 
     def sandbox(i, lay):
@@ -110,9 +120,23 @@ def main() -> int:
         env.pop("SEEDLING_SIM_Q", None)
         env.pop("SEEDLING_CAMERA_SOCK", None)
         t0 = time.time()
-        r = subprocess.run([sys.executable, "-u", "scripts/77_program_run.py", "--max-plants", str(args.max_plants)], cwd=sb,
-                           capture_output=True, text=True, env=env)
-        out = r.stdout + r.stderr
+        out, batches = "", []
+        for _b in range(40 if args.whole_tray else 1):
+            r = subprocess.run([sys.executable, "-u", "scripts/77_program_run.py", "--max-plants", str(args.max_plants)], cwd=sb,
+                               capture_output=True, text=True, env=env)
+            out += r.stdout + r.stderr
+            n_b = len(re.findall(r"^\w\d+ -> H\d+ done", r.stdout, re.M))
+            batches.append(n_b)
+            if not args.whole_tray or n_b == 0:
+                break
+            g_ = json.loads((sb / cfg["tray"]["grid_file"]).read_text())
+            if not g_.get("occupied"):
+                break
+            # the full disc swapped for an empty one where it was
+            df_ = sb / "calibration" / "disc.json"
+            d_ = json.loads(df_.read_text())
+            d_["free_holes"], d_["occupied_holes"] = list(range(1, n_holes + 1)), []
+            df_.write_text(json.dumps(d_, indent=1))
         (sb / "run.log").write_text(out)
         st = json.loads((sb / ".tmp" / "sim_state.json").read_text())
         moves = st.get("log", [])
@@ -123,7 +147,8 @@ def main() -> int:
         ready = [float(x) for x in re.findall(r"^>>> transplant \w\d+ -> H\d+ \(ready in ([\d.]+) s\)", out, re.M)]
         prog_ready = re.findall(r"\(the program's arm configuration ready in ([\d.]+) s\)", out)
         fails = [ln for ln in out.splitlines() if "failed or refused" in ln or "Traceback" in ln or "simulated collision" in ln]
-        return {"layout": lay, "done": len(done), "placed": done, "left_after_close_up": left, "stopped": stopped,
+        left_cells = json.loads((sb / cfg["tray"]["grid_file"]).read_text()).get("occupied", [])
+        return {"layout": lay, "done": len(done), "batches": batches, "left_cells": left_cells, "placed": done, "left_after_close_up": left, "stopped": stopped,
                 "collisions": [m_ for m_ in moves if m_.get("failed")], "min_margin_mm": min([m_["margin_mm"] for m_ in moves] or [0]),
                 "steps": steps, "ready_s": ready, "program_ready_s": float(prog_ready[0]) if prog_ready else None,
                 "fails": fails[:6], "end": (out.strip().splitlines() or [""])[-1], "wall_s": round(time.time() - t0, 1),
@@ -132,7 +157,7 @@ def main() -> int:
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         res = list(ex.map(run, enumerate(layouts)))
-    want = min(args.max_plants, n_holes)
+    want = len(base_grid["occupied"]) if args.whole_tray else min(args.max_plants, n_holes)
     print(f"{len(res)} layouts simulated end to end (disc moved r/l/z, tray moved r/l/z in cm); up to {want} plants each")
     for r in res:
         lay = " ".join(f"{v * 100:+4.0f}" for v in r["layout"])
@@ -140,6 +165,8 @@ def main() -> int:
         print(f"  [{lay}]  {r['done']}/{want} in; left after the close-up {r['left_after_close_up'] or '-'}; "
               f"{'STOPPED ' + str(st_) + '; ' if st_ else ''}collisions {len(r['collisions'])}; closest move {r['min_margin_mm']:+.0f} mm; "
               f"program {r['program_ready_s']} s; {r['wall_s']:.0f} s  ({r['sandbox']})")
+        if args.whole_tray:
+            print(f"      per disc {r['batches']}; left in the tray {r['left_cells']}")
         for f in r["fails"][:3]:
             print(f"      {f[:160]}")
     st = collections.defaultdict(list)

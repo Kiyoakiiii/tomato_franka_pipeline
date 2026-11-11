@@ -30,6 +30,10 @@ DEFAULTS = {
     "env_clearance_mm": 15.0,     # arm / camera / gripper body to table, tray, disc
     "plant_clearance_mm": 10.0,   # to the plant cylinders (leaves are soft)
     "self_clearance_mm": 25.0,    # between the hand (gripper, camera, links 6-7) and links 0-4, link 5 and links 0-2
+    # the camera housing and links 0-5: 15 mm (user, 2026-11-10; was the 25 of the rest): its box is already 35 / 30 / 27 mm
+    # larger than the ZED 2i (210 x 60 x 70 for 175 x 30 x 43 mm); at 25 a full tray had 4 of its far row out of reach
+    # (camera - link5 short by 1-6 mm), at 15 all 72 (scripts/83_tray_reach.py)
+    "camera_self_clearance_mm": 15.0,
 }
 
 
@@ -225,15 +229,17 @@ class World:
         by = {s_[0]: s_ for s_ in S}
         pairs = [(f"link{i}", f"link{j}") for i, j in ((0, 5), (0, 6), (0, 7), (1, 5), (1, 6), (1, 7), (2, 5), (2, 7))]
         pairs += [(a_, f"link{j}") for a_ in ("camera", "gripper", "fingers", "held plug") if a_ in by for j in range(6)]
-        need = p["self_clearance_mm"] / 1000
-        lbs = sorted((float(np.linalg.norm(by[a_][3] - by[b_][3])) - by[a_][4] - by[b_][4] - need, a_, b_) for a_, b_ in pairs)
+        def need_of(a_):
+            return p["camera_self_clearance_mm" if a_ == "camera" else "self_clearance_mm"] / 1000
+
+        lbs = sorted((float(np.linalg.norm(by[a_][3] - by[b_][3])) - by[a_][4] - by[b_][4] - need_of(a_), a_, b_) for a_, b_ in pairs)
         res = C.DistanceResult()
         for b, a_, b_ in lbs:
             if (stop_below is not None and b >= stop_below) or (stop_below is None and b >= out["self"][0]):
                 break
             A, B = by[a_], by[b_]
             res.clear()
-            d = C.distance(A[1], tfs[a_], B[1], tfs[b_], self._req, res) - need
+            d = C.distance(A[1], tfs[a_], B[1], tfs[b_], self._req, res) - need_of(a_)
             if d < out["self"][0]:
                 out["self"] = (d, f"{a_} - {b_}")
                 if stop_below is not None and d < stop_below:

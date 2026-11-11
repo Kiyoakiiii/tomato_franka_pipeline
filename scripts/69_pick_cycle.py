@@ -40,6 +40,8 @@ def main() -> int:
     ap.add_argument("--no-observe", action="store_true", help="no close-up (the program has no observation pose for this "
                     "plant): grasped at the estimated height")
     ap.add_argument("--max-replans", type=int, default=2, help="grasp planned again (another pose) this often when no placement is found from it")
+    ap.add_argument("--inproc", action="store_true", help="every step but the gripper's in this process (seedling.inproc: "
+                    "loaded and connected once; 77 runs its cycles so) instead of a new process each")
     ap.add_argument("--hold-s", type=float, default=0.5, help="pause at the top of the lift (2 s until 2026-11-02)")
     ap.add_argument("--place", type=int, nargs="?", const=0, default=None, metavar="HOLE",
                     help="transplant: put the plant into this disc hole (1..6; no number: the planner's choice)")
@@ -89,6 +91,15 @@ def main() -> int:
     import os
 
     sim = bool(os.environ.get("SEEDLING_SIM_STATE"))  # the whole-run simulation: no gripper (its scripts not run)
+
+    def run_step(cmd):
+        """one step: its exit code (in this process with --inproc, the gripper's always in its own process: its code and
+        how it is driven are left as they are)"""
+        if args.inproc and cmd[0] != "scripts/66_gripper.py":
+            from seedling.inproc import run_script
+
+            return run_script(cmd[0], cmd[1:])
+        return subprocess.run([py, "-u", *cmd], cwd=PROJECT_DIR).returncode
     t_steps = {}
     for i, (name, cmd) in enumerate(steps, 1):
         if stop.exists():
@@ -99,9 +110,9 @@ def main() -> int:
             print("(simulated: no gripper)")
             continue
         t_s = time.time()
-        r = subprocess.run([py, "-u", *cmd], cwd=PROJECT_DIR)
+        rc = run_step(cmd)
         t_steps[name] = round(time.time() - t_s, 2)
-        while r.returncode != 0 and name == "plan the placement" and replans < args.max_replans:
+        while rc != 0 and name == "plan the placement" and replans < args.max_replans:
             # no placement from this grasp pose (the hand stays flat while carrying: the grasp's joint configuration
             # decides): another grasp pose (65 leaves out the ones in {cell}_no_place.json), then the placement again
             replans += 1
@@ -109,11 +120,11 @@ def main() -> int:
             avoid.append(json.loads((gdir / f"{args.cell}_side_plan.json").read_text())["q"]["grasp"])
             npf.write_text(json.dumps(avoid))
             print(f">>> no placement from this grasp: the grasp planned again without it ({replans}/{args.max_replans})", flush=True)
-            if subprocess.run([py, "-u", *dict(steps)["plan"]], cwd=PROJECT_DIR).returncode != 0:
+            if run_step(dict(steps)["plan"]) != 0:
                 break
-            r = subprocess.run([py, "-u", *cmd], cwd=PROJECT_DIR)
-        if r.returncode != 0:
-            print(f"step {i} ({name}) failed or refused (exit {r.returncode}): cycle stopped", flush=True)
+            rc = run_step(cmd)
+        if rc != 0:
+            print(f"step {i} ({name}) failed or refused (exit {rc}): cycle stopped", flush=True)
             # exit 3: no plan, the plant not touched (the arm at most at the observation pose): 72 goes on with another
             # (the close-up too: the arm only went to the observation pose, or did not move; "no safe way there" is this
             # plant's alone)
