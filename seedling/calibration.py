@@ -41,7 +41,7 @@ def save_T_BC(path: str | Path, T_BC: np.ndarray, meta: dict) -> Path:
 def load_T_BC(cfg: dict, path: str | Path | None = None) -> tuple[np.ndarray, dict]:
     path = project_path(path or cfg["camera"]["T_base_cam_file"])
     if not path.exists():
-        raise FileNotFoundError(f"camera extrinsics not found: {path}. (fixed-camera mount; the 30/31 hand-eye scripts are in archive/cleanup_20261102/scripts).")
+        raise FileNotFoundError(f"camera extrinsics not found: {path}. (fixed-camera mount; the 30/31 hand-eye scripts are in the git history, before 2026-11-10).")
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     return T_from_list(data["T_base_cam"]), data
 

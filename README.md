@@ -41,14 +41,17 @@ seedling/               核心代码
   disc.py                 定位红色圆盘和空洞（洞口红圈；被叶子挡住时用外圈轮廓 + 转角）
   plugsense.py            近距离测土块顶面高度
   stemline.py             颜色掩码（绿色植物 / 褐色基质）与茎线双目三角化
-  wrist.py                观察位规划、机械臂各部位离地检查
+  wrist.py                观察位规划、机械臂各部位离地检查、手到机械臂本体的距离（自碰撞）
+  program.py              移植"程序"：每株苗用同一个夹取 / 放置模板，移到它的穴位和洞（77 用）
+  world.py                机械臂和周围物体的碰撞模型（每段路径都用它检查）
+  cartesian.py / planner.py  直线段运动 / 关节空间路径搜索
+  order.py                移植顺序（最近一排、从右到左）
   transforms.py / config.py / synthetic.py（仿真场景，只给测试用）
 scripts/                入口脚本（见下表）
-tests/                  自动测试（不需要硬件）：.venvs/pipeline/bin/python -m pytest -q tests
+tests/                  自动测试（不需要硬件）：LD_LIBRARY_PATH=.venvs/pipeline/trt_links .venvs/pipeline/bin/python -m pytest -q tests
 tools/                  环境安装脚本
 calibration/            T_flange_cam.yaml（相机标定）、tray_grid.json / disc.json（最近一次定位）、标定采集 sessions/
 experiments/            实验输出：tray/（每次定位的照片和叠加图）、grasp/（夹取计划、日志、近距离照片）
-archive/                旧代码：legacy_v0/（第一版）、cleanup_20261102/（2026-11-02 整理时移出的脚本和模块）
 .venvs/pipeline/        项目运行环境（Python 3.12，franky 2.0，pyzed，TensorRT）
 ```
 
@@ -68,7 +71,10 @@ archive/                旧代码：legacy_v0/（第一版）、cleanup_20261102
 | 一株完整流程 | `$P scripts/69_pick_cycle.py --cell C5 --place 3`（或 `--put-back` 放回原处） | 会 |
 | 放进圆盘（分步） | `$P scripts/71_place_in_disc.py plan --cell C5 --free 1,2,3` | plan 不会 |
 | 全自动移植（程序流程） | `$P scripts/77_program_run.py [--max-plants N] [--no-locate] [--reteach]`（`run_transplant.sh` 用的就是它） | 会 |
-| 全自动移植（旧流程） | `$P scripts/72_transplant_all.py [--pause] [--dry-run] [--max-plants N]` | 会 |
+| 建程序 / 单株夹取或放置计划 | `$P scripts/76_program.py build` / `grasp --cell C5` / `place --cell C5 --hole 3` | 不会 |
+| 托盘、圆盘放哪里更好 | `$P scripts/78_layout_check.py [--tray]` | 不会 |
+| 整轮移植模拟（随机摆放） | `$P scripts/80_sim_run.py --n 8`（`79_program_eval.py`：只评估程序） | 不会 |
+| 手指着某个洞 / 穴位检查对准 | `$P scripts/81_point_check.py H2 --down`，`back` 回总览位 | 会 |
 | 重新确定总览位 | `$P scripts/70_overview_for_area.py --dry-run`（去掉才动，并写入配置） | 会 |
 | 相机标定 | `32_wrist_calib_collect.py` 采集 → `33_wrist_calib_solve.py ... --save`；`34_wrist_calib_check.py` 快速检查；`36_wrist_calib_validate_collect.py` + `35_wrist_calib_eval.py` 独立验证 / 多次合并 | 会（每步确认） |
 
