@@ -13,6 +13,7 @@
 touch experiments/grasp/STOP to stop between steps (never stop a script while the arm moves).
 
     .venvs/pipeline/bin/python scripts/77_program_run.py --max-plants 3
+    .venvs/pipeline/bin/python scripts/77_program_run.py --no-locate   # the tray and disc as the last locate left them
 """
 from __future__ import annotations
 
@@ -34,6 +35,9 @@ def main() -> int:
     ap.add_argument("--max-plants", type=int, default=6)
     ap.add_argument("--skip", default="", help="comma list of cells not to take")
     ap.add_argument("--reteach", action="store_true", help="teach the program again even if the layout is the same")
+    ap.add_argument("--no-locate", action="store_true",
+                    help="do not locate again: take the tray and the disc as the last locate left them (checked on its overlay "
+                         "picture; the files keep track of the plants taken and the holes filled since)")
     args = ap.parse_args()
     cfg = config_from_args(args)
     py = sys.executable
@@ -97,7 +101,16 @@ def _run(args, cfg, gdir, stop, run, env_plan, sim=False) -> int:
     if run(["scripts/68_goto_overview.py"])[0] != 0:
         print("cannot go to the overview pose: stopped")
         return 1
-    rc, out = run(["scripts/60_tray_locate.py"], quiet=True) if not sim else (0, "(simulated: the files as they are)")
+    if sim:
+        rc, out = 0, "(simulated: the files as they are)"
+    elif args.no_locate:
+        g0 = json.loads(gf.read_text())
+        age = (time.time() - gf.stat().st_mtime) / 60
+        rc = 0 if g0.get("ok") else 1
+        out = (f"grid: the last locate as it is (--no-locate; file written {age:.0f} min ago), A1 {g0['cells']['A1'][:2]}, "
+               f"top {g0.get('z_top', 0):.3f} m, plants in {sorted(g0.get('occupied', []))}")
+    else:
+        rc, out = run(["scripts/60_tray_locate.py"], quiet=True)
     print("\n".join(ln[:200] for ln in out.splitlines() if ln.startswith(("grid", "disc", "overlay", "CORRECTED", "REJECTED")) or "cells with" in ln))
     disc = json.loads(df.read_text())
     if rc != 0 or not disc.get("ok") or disc.get("ok_last_picture") is False:

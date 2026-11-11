@@ -107,12 +107,22 @@ def main() -> int:
 
     obs_valid = obs_valid_for()
 
+    from seedling.wrist import path_self_clearance
+
+    min_self = float(cfg["tray"].get("observe", {}).get("min_self_clearance_m", 0.09))  # as the observation poses
+
     def check_pieces(world, q0, wps, **kw):
+        """each straight joint piece clear of the world (meshes) and of Franka's self-collision reflex: the hand at least
+        min_self from the axes of the arm's base, upper arm and forearm (wrist.self_clearance, as 65 / 71 / the
+        observation poses check it; the program's paths did not, 2026-11-10)"""
         qa = np.asarray(q0, float)
         for qb in wps:
             m, where = world.worst(qa, qb, **kw)
             if m < 0:
                 return f"{where} {m * 1000:+.0f} mm"
+            sc = path_self_clearance(qa, np.asarray(qb, float), T_FC, cfg)
+            if sc < min_self:
+                return f"hand {sc * 1000:.0f} mm from the arm's own axes (self-collision reflex below {min_self * 1000:.0f} mm)"
             qa = qb
         return ""
 
@@ -548,6 +558,7 @@ def grasp_plan(prog, cell, cfg, grid, disc, q_start, planted, world_disc, check_
         if clr < 0.005:
             return f"the hand would pass through other plants (within {clr * 1000:.0f} mm of a stem)"
     soil, height = si["soil"], si["height"]
+    pitch = float(si.get("pitch_deg", 0.0))  # the hand pitched down (grasp_for_place: deep in the tray), 0 = flat
     # the highest closing point: 35 mm above the soil (the estimate), a variant may allow more (deep in the tray the
     # wrist behind the flat hand is over the tray: 2026-11-05, row D, link7 4 mm over the tray top at 35 mm)
     # (raised for the tray / table / disc at most to 50 mm: how close the arm comes depends on the hand's height, not
@@ -562,7 +573,7 @@ def grasp_plan(prog, cell, cfg, grid, disc, q_start, planted, world_disc, check_
             z_close = zf
     w_at = world_disc()  # at the plant: fingers and plants not checked (the heading keeps the hand off the others)
     for _ in range(4):
-        P = prog.cell_poses(cell, z_close, yaw)
+        P = prog.cell_poses(cell, z_close, yaw, pitch_deg=pitch)
         q_g, why = prog.grasp_joints(P["grasp"], ci, q_seed=seed)
         if q_g is None:
             return why
@@ -648,13 +659,13 @@ def grasp_plan(prog, cell, cfg, grid, disc, q_start, planted, world_disc, check_
                   "pregrasp": tpl["pregrasp"].tolist(), "grasp": tpl["grasp"].tolist(), "lift": tpl["lift"].tolist()},
             "vias": [np.asarray(v).tolist() for v in vias],
             **{f"{n}_vias": [np.asarray(w).tolist() for w in wps[:-1]] for n, _q0, wps in tpl["pieces"]},
-            "z_close": round(float(z_close), 4), "tray_top": round(prog.tray_top, 4), "yaw": yaw, "soil_z": si["soil"], "soil_z_low": si.get("soil_low", si["soil"]),
+            "z_close": round(float(z_close), 4), "pitch_deg": pitch, "tray_top": round(prog.tray_top, 4), "yaw": yaw, "soil_z": si["soil"], "soil_z_low": si.get("soil_low", si["soil"]),
             **(obs_from or {}), "cell_xy": [float(v) for v in c[:2]], "program": True, "config": ci, "safe": True}
     if write:
         print(f"soil surface of {cell}: z {si['soil']:.3f} ({(si['soil'] - prog.tray_top) * 1000:+.0f} mm vs the tray top) from {si['src']}")
         print(f"cell {cell}: closing point {np.round(P['close'], 4).tolist()}, {(z_close - si['soil']) * 1000:.0f} mm above the soil; "
               f"the turn {'one joint move' if not vias else f'through {len(vias)} via pose(s)'}")
-        print(f"approach pitched 0 deg down, heading {yaw_rel:+.0f} deg from straight out (the program's direction); camera above the gripper")
+        print(f"approach pitched {pitch:g} deg down, heading {yaw_rel:+.0f} deg from straight out (the program's direction); camera above the gripper")
         (OUT / f"{cell}_side_plan.json").write_text(json.dumps(plan, indent=1))
         print("plan saved", (OUT / f"{cell}_side_plan.json").relative_to(PROJECT_DIR))
     return plan
@@ -679,28 +690,48 @@ def grasp_for_place(prog, cell, cfg, grid, disc, q_start, planted, world_disc, c
     if z_nominal is not None and si["height"] - 1e-9 <= z_nominal - si["soil"] <= 0.050:
         # the hand where the program's plan had it (checked when it was built): the same ways in and out
         hs.add(float(z_nominal - si["soil"]))
-    # the hole meant for it at every height first, then the others (another hole would take a later plant's)
+    # the hole meant for it at every height first, then the others (another hole would take a later plant's). At each
+    # height the flat grasp, and where it had to be raised (the wrist over the tray walls: deep in the tray) the hand
+    # pitched down too (GRASP_PITCHES); the lowest closing point first, the flat one on a tie. A pitched grasp keeps its
+    # pitch to the hole (the stem upright); when it cannot let go there, the flat one at that height still can (so never
+    # worse than flat: 2026-11-06, pitched alone, D8 was let go from 37 mm instead of 27)
+    from seedling.program import GRASP_PITCHES, RIM
+
     plans = {}
+
+    def candidate(si_h):
+        r = grasp_plan(prog, cell, cfg, grid, disc, q_start, planted, world_disc, check_pieces, si_h, args, write=False,
+                       ci=ci, variant=variant, stems=stems, turn_search=turn_search, taken_extra=extra_taken)
+        hh = {}
+        if not isinstance(r, str):
+            below = float(r["close_point"][2] - r.get("soil_z_low", r["soil_z"]) + PLUG)
+            hh = prog.quick_holes(np.array(r["q"]["lift"]), below, world_disc(list(extra_taken), stems=True), list(holes),
+                                  prefer=taught, pitch_deg=float(si_h.get("pitch_deg", 0.0)))
+        return r, hh, si_h
+
     for hole in holes:
         for h in sorted(hs):
             if h not in plans:
-                si_h = dict(si, height=h)
-                r = grasp_plan(prog, cell, cfg, grid, disc, q_start, planted, world_disc, check_pieces, si_h, args, write=False,
-                               ci=ci, variant=variant, stems=stems, turn_search=turn_search, taken_extra=extra_taken)
-                hh = {}
-                if not isinstance(r, str):
-                    below = float(r["close_point"][2] - r.get("soil_z_low", r["soil_z"]) + PLUG)
-                    hh = prog.quick_holes(np.array(r["q"]["lift"]), below, world_disc(list(extra_taken), stems=True), list(holes),
-                                          prefer=taught)
-                plans[h] = (r, hh, si_h)
-            r, hh, si_h = plans[h]
-            if isinstance(r, str):
-                last = r
-                continue
-            last = f"no hole from a grasp {h * 1000:.0f} mm above the soil"
-            if hole in hh and not isinstance(place_plan(prog, cell, hole, r, left_after, world_disc, check_pieces,
-                                                        extra_taken=extra_taken, prefer=hh[hole], only_prefer=True), str):
-                return r, hole, si_h
+                si_h = dict(si, height=h, pitch_deg=0.0)
+                cands = [candidate(si_h)]
+                r0 = cands[0][0]
+                z_want = max(si["soil"] + h, prog.tray_top + RIM)
+                if isinstance(r0, str) or r0["z_close"] > z_want + 0.004:
+                    for p_ in GRASP_PITCHES:  # the flattest that is not raised (each try costs ~0.5 s in the cycle)
+                        cands.append(candidate(dict(si_h, pitch_deg=p_)))
+                        r_ = cands[-1][0]
+                        if not isinstance(r_, str) and r_["z_close"] <= z_want + 0.004:
+                            break
+                ok_ = [c_ for c_ in cands if not isinstance(c_[0], str)]
+                plans[h] = sorted(ok_, key=lambda c_: (round(c_[0]["z_close"], 3), c_[0]["pitch_deg"])) or [cands[0]]
+            for r, hh, si_h in plans[h]:
+                if isinstance(r, str):
+                    last = r
+                    continue
+                last = f"no hole from a grasp {h * 1000:.0f} mm above the soil"
+                if hole in hh and not isinstance(place_plan(prog, cell, hole, r, left_after, world_disc, check_pieces,
+                                                            extra_taken=extra_taken, prefer=hh[hole], only_prefer=True), str):
+                    return r, hole, si_h
     return last, None, None
 
 
@@ -731,7 +762,7 @@ def place_plan(prog, cell, hole, gp, left, world_disc, check_pieces, extra_taken
     last = "no heading"
     for dy in heads:
         for raise_m in (0.0, 0.01, 0.02, 0.03):
-            H = prog.hole_poses(hole, dy, below, raise_m)
+            H = prog.hole_poses(hole, dy, below, raise_m, pitch_deg=float(gp.get("pitch_deg", 0.0)))
             q_ac, carry = prog.carry(q_up, T_up, H["at"](T_up[2, 3]))
             if q_ac is None:
                 last = f"heading {dy:+.0f}: no straight flat carry"

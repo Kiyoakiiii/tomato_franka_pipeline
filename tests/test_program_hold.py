@@ -40,3 +40,23 @@ def test_the_plug_length_comes_from_the_lowest_soil_reading():
     si = m.soil_info(grid, "C8", obs, 0.182)
     assert si["soil"] == 0.215 and si["soil_low"] == 0.197
 
+
+
+def test_a_pitched_hand_brings_the_clamped_stem_over_the_hole_and_keeps_it_upright(cfg):
+    """a grasp made with the hand pitched down (deep in the tray) keeps that pitch to the hole: the clamped point over
+    the hole centre, and the hand's attitude at the hole the same as at the grasp up to the turn about the vertical
+    (so the stem, vertical at the grasp, is vertical when it is let go)"""
+    from seedling.program import GRASP_PITCHES
+
+    p = _prog(cfg, [0.0, 0.0])
+    for pitch in GRASP_PITCHES:
+        P = p.cell_poses("D8", 0.20, pitch_deg=pitch)
+        Tg = P["grasp"]
+        assert np.isclose(np.degrees(np.arcsin(-Tg[2, 2])), pitch)  # the approach axis pitched down
+        clamp_in_hand = Tg[:3, :3].T @ (P["close"] - Tg[:3, 3])
+        up_in_hand = Tg[:3, :3].T @ np.array([0.0, 0.0, 1.0])
+        for hole in (1, 4):
+            Ti = p.hole_poses(hole, 20.0, 0.06, pitch_deg=pitch)["insert"]
+            clamp = Ti[:3, 3] + Ti[:3, :3] @ clamp_in_hand
+            assert np.allclose(clamp[:2], p.holes[hole - 1][:2], atol=1e-9)
+            assert np.allclose(Ti[:3, :3] @ up_in_hand, [0.0, 0.0, 1.0], atol=1e-9)

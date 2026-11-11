@@ -6,11 +6,13 @@ FR3 机械臂按托盘穴位坐标侧向夹取番茄苗（连土块），放进�
 
 ```bash
 cd /home/kevin/projects/tomato_franka_pipeline
-./run_transplant.sh            # 一条命令跑完：中间按空格继续，q 停止
+./run_transplant.sh            # 一条命令跑完（scripts/77_program_run.py，最多 6 株）
 ./run_transplant.sh run 1      # 同上，只做一株
+./run_transplant.sh locate     # 只定位，看叠加图确认无误后：
+./run_transplant.sh again 3    # 不重新定位，用上一次 locate 的结果跑 3 株
 ```
 
-运行时先检查机械臂（连不上或有报错就停下，并提示怎么处理），然后在两个地方暂停等你按键：第一次回总览位之前；每株苗开始之前，屏幕上会显示要夹哪株、放进哪个洞、从哪个方向接近。按 q 后，会等当前动作做完再停，紧急情况请直接按急停。
+运行时先检查机械臂（连不上或有报错就停下，并提示怎么处理），按空格开始。之后回总览位、定位一次，按顺序（最近的一排、从右到左）移植，下一株在机械臂动的时候在后台规划好。要停下，另开终端运行 `./run_transplant.sh stop`，会等当前这一步做完再停；紧急情况请直接按急停。
 
 单独调试时可以用：`check`（机械臂状态）、`locate`（回总览位并定位）、`plan`（只规划不动）、`stop`（另开终端运行，当前这一步做完后停下）、`open`（松开夹爪）、`overview`（只回总览位）。例如 `./run_transplant.sh plan`。
 
@@ -65,7 +67,8 @@ archive/                旧代码：legacy_v0/（第一版）、cleanup_20261102
 | 回总览位 | `$P scripts/68_goto_overview.py [--dry-run]` | 会 |
 | 一株完整流程 | `$P scripts/69_pick_cycle.py --cell C5 --place 3`（或 `--put-back` 放回原处） | 会 |
 | 放进圆盘（分步） | `$P scripts/71_place_in_disc.py plan --cell C5 --free 1,2,3` | plan 不会 |
-| 全自动移植 | `$P scripts/72_transplant_all.py [--pause] [--dry-run] [--max-plants N]`（`run_transplant.sh` 用的是 `--pause`） | 会 |
+| 全自动移植（程序流程） | `$P scripts/77_program_run.py [--max-plants N] [--no-locate] [--reteach]`（`run_transplant.sh` 用的就是它） | 会 |
+| 全自动移植（旧流程） | `$P scripts/72_transplant_all.py [--pause] [--dry-run] [--max-plants N]` | 会 |
 | 重新确定总览位 | `$P scripts/70_overview_for_area.py --dry-run`（去掉才动，并写入配置） | 会 |
 | 相机标定 | `32_wrist_calib_collect.py` 采集 → `33_wrist_calib_solve.py ... --save`；`34_wrist_calib_check.py` 快速检查；`36_wrist_calib_validate_collect.py` + `35_wrist_calib_eval.py` 独立验证 / 多次合并 | 会（每步确认） |
 

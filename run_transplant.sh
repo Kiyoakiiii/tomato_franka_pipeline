@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
-# 番茄苗移植。一条命令跑完整个流程，中间按空格继续、q 停止：
+# 番茄苗移植（77 程序流程）。一条命令跑完整个流程：
 #
-#   ./run_transplant.sh              检查机械臂 -> [空格] 回总览位定位 -> 每株苗前显示"夹哪株、放哪个洞" [空格] -> ... 直到圆盘放满
+#   ./run_transplant.sh              检查机械臂 -> [空格] 回总览位、定位一次 -> 按顺序移植，直到圆盘放满（最多 6 株）
 #   ./run_transplant.sh run N        同上，最多 N 株
+#   ./run_transplant.sh again N      不重新定位：用上一次 locate 的结果（先看过叠加图确认无误），最多 N 株
 #
 # 其他命令（单独调试用）：
 #   ./run_transplant.sh check        查看机械臂状态和报错（不动，不清除报错）
-#   ./run_transplant.sh locate       回总览位，拍照定位托盘和圆盘（会动）
-#   ./run_transplant.sh plan         只规划不动：用 locate 的结果列出夹取顺序和放哪个洞
+#   ./run_transplant.sh locate       回总览位，拍照定位托盘和圆盘（会动）；看叠加图确认后可用 again 运行
+#   ./run_transplant.sh plan         只规划不动：用 locate 的结果建程序，列出每株苗放哪个洞
 #   ./run_transplant.sh stop         另开一个终端运行：当前这一步做完后停下
 #   ./run_transplant.sh open         松开夹爪（机械臂不动）
 #   ./run_transplant.sh overview     只回总览位（会动）
 #
-# 紧急情况直接按急停（q 和 stop 都要等当前动作做完）。报错要在 Desk 里清除，本脚本从不自动清除报错。
-# 每次运行的输出保存在 experiments/grasp/logs/，近距离照片保存在 experiments/grasp/closeups/。
+# 紧急情况直接按急停（stop 要等当前动作做完）。报错要在 Desk 里清除，本脚本从不自动清除报错。
+# 每次运行的输出保存在 experiments/grasp/logs/。
 set -u
 cd "$(dirname "$(readlink -f "$0")")"
 PY=.venvs/pipeline/bin/python
@@ -55,12 +56,13 @@ robot_ok() {  # 读一次状态（不动）：连不上或有报错就停
     echo "机械臂已连接，没有报错"
 }
 
-transplant() {
+transplant() {  # $1 最多几株，$2 其余参数（例如 --no-locate）
     busy
     robot_ok
     echo "开始前确认：托盘和圆盘都在视野里、机械臂周围没有人和障碍、手放在急停上。"
+    pause_key "开始移植（最多 $1 株）"
     log="$GRASP/logs/run_$(date +%Y%m%d_%H%M%S).txt"
-    "$PY" -u scripts/72_transplant_all.py --pause --max-plants "$1" 2>&1 | tee "$log"
+    "$PY" -u scripts/77_program_run.py --max-plants "$1" ${2:-} 2>&1 | tee "$log"
     echo "本次输出已保存: $log"
 }
 
@@ -72,6 +74,9 @@ case "$cmd" in
     run)
         transplant "${2:-6}"
         ;;
+    again)
+        transplant "${2:-6}" --no-locate
+        ;;
     check)
         busy
         "$PY" scripts/20_robot_state.py
@@ -81,11 +86,13 @@ case "$cmd" in
         pause_key "机械臂将慢速回到总览位，然后拍照定位"
         "$PY" -u scripts/68_goto_overview.py || { echo "回总览位失败，没有定位"; exit 1; }
         "$PY" -u scripts/60_tray_locate.py
-        echo "定位结果: calibration/disc.json 和托盘文件；叠加图路径见上面 overlay 一行。下一步: ./run_transplant.sh plan"
+        echo "定位结果: calibration/disc.json 和托盘文件；叠加图路径见上面 overlay 一行。看过叠加图无误后: ./run_transplant.sh again N"
         ;;
     plan)
         busy
-        "$PY" -u scripts/72_transplant_all.py --dry-run
+        mkdir -p .tmp
+        "$PY" -c 'import json,yaml;print(json.dumps({"q": yaml.safe_load(open("configs/pipeline.yaml"))["tray"]["overview_q"]}))' > .tmp/overview_q.json
+        SEEDLING_SIM_Q=.tmp/overview_q.json "$PY" -u scripts/76_program.py build 2>&1 | grep -v "closing point raised\|nanobind\|leaked"
         ;;
     stop)
         touch "$GRASP/STOP"
@@ -101,6 +108,6 @@ case "$cmd" in
         "$PY" -u scripts/68_goto_overview.py
         ;;
     *)
-        sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
         ;;
 esac

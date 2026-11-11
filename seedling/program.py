@@ -62,9 +62,18 @@ MAX_TILT = 10.0       # deg, the hand from flat while the plant is held (user, 2
 HEADINGS = [0.0] + [s_ * d_ for d_ in range(10, 180, 10) for s_ in (-1, 1)] + [180.0]
 
 
-def flat_R(yaw: float):
-    """flat hand (fingers level, camera above) approaching along yaw: (R, approach vector)"""
-    a = np.array([np.cos(yaw), np.sin(yaw), 0.0])
+# a grasp deep in the tray may be made with the hand pitched down this much (and kept so until it lets go: the stem
+# stays upright): the wrist behind a flat hand is lower than its fingers and comes over the tray walls from the second
+# row on, so a flat grasp there had to be raised (2026-11-06: row D 27-50 mm above the soil). Only where the flat grasp
+# was raised; the flat one is always tried too (76 grasp_for_place). The user allowed 10 deg; 8 keeps the carry
+# within MAX_TILT
+GRASP_PITCHES = (4.0, 8.0)
+
+
+def flat_R(yaw: float, pitch_deg: float = 0.0):
+    """the hand (camera above) approaching along yaw, fingers level or pitched pitch_deg down: (R, approach vector)"""
+    p_ = np.radians(pitch_deg)
+    a = np.array([np.cos(yaw) * np.cos(p_), np.sin(yaw) * np.cos(p_), -np.sin(p_)])
     across = np.array([np.sin(yaw), -np.cos(yaw), 0.0])
     return np.column_stack([np.cross(across, a), across, a]), a
 
@@ -112,15 +121,18 @@ class Program:
         (2026-11-05, C6 into H3 / H5), so it is no filter"""
         return self.chain(q0, targets, sparse=False)
 
-    def cell_poses(self, cell: str, z_close: float, yaw: float | None = None) -> dict:
-        """the template's hand poses at this cell, approaching along yaw (default: the program's direction)"""
-        R, a = flat_R(yaw) if yaw is not None else (self.R, self.a)
+    def cell_poses(self, cell: str, z_close: float, yaw: float | None = None, pitch_deg: float = 0.0) -> dict:
+        """the template's hand poses at this cell, approaching along yaw (default: the program's direction), the hand
+        pitched pitch_deg down (the closing point stays where it is)"""
+        R, a = flat_R(yaw if yaw is not None else self.yaw, pitch_deg) if (yaw is not None or pitch_deg) else (self.R, self.a)
         c = self.grid["cells"][cell]
         across = np.array([np.sin(np.arctan2(a[1], a[0])), -np.cos(np.arctan2(a[1], a[0])), 0.0])
-        close = np.array([c[0], c[1], z_close]) + a * self.side_off[0] + across * self.side_off[1]
+        a_h = np.array([a[0], a[1], 0.0]) / np.hypot(a[0], a[1])  # the offset along the approach, level
+        close = np.array([c[0], c[1], z_close]) + a_h * self.side_off[0] + across * self.side_off[1]
         grasp = close - a * self.fwd  # the open gap centre: the fingers swing forward onto the closing point
         pre = grasp - a * STANDOFF
-        return {"close": close, "R": R, "yaw": float(yaw if yaw is not None else self.yaw), "grasp": make_T(R, grasp),
+        return {"close": close, "R": R, "yaw": float(yaw if yaw is not None else self.yaw), "pitch_deg": float(pitch_deg),
+                "grasp": make_T(R, grasp),
                 "pre": make_T(R, pre), "stage": make_T(R, pre + [0, 0, STAGE_UP]), "lift": make_T(R, grasp + [0, 0, LIFT])}
 
     def hand_clearance(self, cell: str, yaw: float, stems) -> float:
@@ -174,9 +186,11 @@ class Program:
     def z_carry(self, z_lift, below):
         return max(self.tray_top + TRANSIT + below, z_lift, self.disc_top + PLACED_PLANT + 0.020 + below)
 
-    def hole_poses(self, hole: int, dyaw: float, below: float, raise_m: float = 0.0):
+    def hole_poses(self, hole: int, dyaw: float, below: float, raise_m: float = 0.0, pitch_deg: float = 0.0):
+        """over the hole with the hand as it holds the plant (pitched as at the grasp: the stem upright), the clamped
+        point over the hole centre"""
         hxy = self.holes[hole - 1][:2]
-        R_h, a_h = flat_R(float(np.arctan2(hxy[1], hxy[0]) + np.radians(dyaw)))
+        R_h, a_h = flat_R(float(np.arctan2(hxy[1], hxy[0]) + np.radians(dyaw)), pitch_deg)
         z_ins = self.disc_top + below + raise_m
 
         def at(z):
@@ -308,11 +322,11 @@ class Program:
         except (KeyError, TypeError):
             return False
 
-    def _hole_ok(self, q_up, T_up, h, dy, below, world, fine: bool = False) -> bool:
+    def _hole_ok(self, q_up, T_up, h, dy, below, world, fine: bool = False, pitch_deg: float = 0.0) -> bool:
         """from q_up (over the tray, at the carry height): the flat carry to above hole h at heading dy (moving and
         turning together, else turning first) once, then the way in and out for letting go 0-30 mm higher; whether it
         follows and the release is clear in world (a quick filter)"""
-        H0 = self.hole_poses(h, dy, below)
+        H0 = self.hole_poses(h, dy, below, pitch_deg=pitch_deg)
         T_ac = H0["at"](T_up[2, 3])
         go = (lambda q0, t: self.chain(q0, t, sparse=False)) if fine else self.reach  # teaching: the fine line
         for route in ([("carry", T_ac)], [("turn", make_T(T_ac[:3, :3], T_up[:3, 3])), ("carry", T_ac)]):
@@ -321,7 +335,7 @@ class Program:
                 continue
             q_ac = car[-1][1][-1]
             for raise_m in (0.0, 0.01, 0.02, 0.03):  # letting go higher when the arm comes too close to something there
-                H = self.hole_poses(h, dy, below, raise_m)
+                H = self.hole_poses(h, dy, below, raise_m, pitch_deg=pitch_deg)
                 rest, _w = go(q_ac, [("above", H["above"]), ("insert", H["insert"]), ("back", H["back"]), ("up after", H["up after"])])
                 if rest is None:
                     break  # higher does not help
@@ -329,7 +343,7 @@ class Program:
                     return True
         return False
 
-    def quick_holes(self, q_lift, below, world, holes, prefer: dict | None = None) -> dict:
+    def quick_holes(self, q_lift, below, world, holes, prefer: dict | None = None, pitch_deg: float = 0.0) -> dict:
         """for these holes, the first heading from which a flat hand carried from this lift pose lets go into it (joint
         continuity of the whole way, the release clear in world): {hole: heading}; a quick filter before the plans"""
         T_l = self.G_of(q_lift)
@@ -344,7 +358,7 @@ class Program:
             # the heading taught for the hole first (it usually works: one try instead of a sweep)
             heads = ([prefer[h]] if prefer and h in prefer else []) + [d for d in HEADINGS if not (prefer and prefer.get(h) == d)]
             for dy in heads:
-                if self._hole_ok(q_up, T_up, h, dy, below, world):
+                if self._hole_ok(q_up, T_up, h, dy, below, world, pitch_deg=pitch_deg):
                     out[h] = dy
                     break
         return out

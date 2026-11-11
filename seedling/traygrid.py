@@ -285,6 +285,34 @@ def locate_tray(frame: Frame, T_BC: np.ndarray, cfg: dict, prior: dict | None = 
 
     plain = (~_mask(frame.rgb, cfg["stemline"]) & ~substrate_mask(frame.rgb, cfg["stemline"]))[ok]
 
+    # the tray top from the dense depth on the walls (midpoints between neighbouring cells), not the height-peak guess
+    # (seen from above, the plug tops, 1-2 cm higher, can form the higher peak). The template matched the picture on
+    # the plane z; the walls it matched stand at the wall-top height: each cell is moved along its camera ray from the
+    # plane z onto that height (seen at ~45 deg, a plane 1 mm off moves the grid ~1 mm along the view, i.e. along the
+    # rows). 2026-11-10: a picture matched at 0.171 m for walls at 0.185 m put the grid 16 mm (0.4 row) toward the far
+    # side; the whole-row correction onto the outline then left it 0.4 row off and the run took the wrong row. Before
+    # the whole-cell checks below: they look 20 mm around each cell centre
+    cam = T_BC[:3, 3]
+    for _ in range(3):
+        mids = []
+        for k_, (x_, y_, _) in cells.items():
+            c_ = int(k_[1:])
+            for nb in (f"{k_[0]}{c_ + 1}", f"{chr(ord(k_[0]) + 1)}{c_}"):
+                if nb in cells:
+                    mids.append(0.5 * (np.array([x_, y_]) + np.array(cells[nb][:2])))
+        idx = sorted({i for lst in tree.query_ball_point(np.array(mids), 0.004) for i in lst})
+        zw = Pd[idx, 2]
+        zw = zw[np.abs(zw - z) < 0.03]
+        if len(zw) <= 200:
+            break
+        z_wall = float(np.median(zw))
+        if abs(z_wall - z) < 0.0005:
+            break
+        s_ = (z_wall - cam[2]) / (z - cam[2])
+        cells = {k_: [round(float(cam[0] + (c[0] - cam[0]) * s_), 4), round(float(cam[1] + (c[1] - cam[1]) * s_), 4), round(z_wall, 4)]
+                 for k_, c in cells.items()}
+        z = z_wall
+
     def check_cells(cl):
         seen, off, above = 0, [], []
         for k, (x, y, _) in cl.items():
@@ -321,7 +349,12 @@ def locate_tray(frame: Frame, T_BC: np.ndarray, cfg: dict, prior: dict | None = 
                 d = a * col + b * row
                 cl = {k: [round(float(v[0] + d[0]), 4), round(float(v[1] + d[1]), 4), v[2]] for k, v in cells.items()}
                 r = check_cells(cl)
-                key = (len(r[1]), len(r[2]), -r[0], abs(a) + abs(b))
+                # more cells with depth count only by 4 or more: the tray's flat front rim and the stand under it
+                # have depth at the tray-top height too, and one row moved onto them "saw" 1-3 cells more than the
+                # right fit (cells under leaves or at the far edge have none). 85 overview pictures of 2026-11-02..06:
+                # the right fit without any whole-cell move on 45 (9 before), every other one off by whole cells
+                # the outline then puts right, none left ambiguous (9 before); the cut-off case above gained 4
+                key = (len(r[1]), len(r[2]), -(r[0] if r[0] - seen >= 4 else seen), abs(a) + abs(b))
                 if key < best[0]:
                     best = key, (a, b), r, cl
         if best[1] != (0, 0):
@@ -330,26 +363,6 @@ def locate_tray(frame: Frame, T_BC: np.ndarray, cfg: dict, prior: dict | None = 
             cells = best[3]
     a1_, a12 = np.array(cells["A1"][:2]), np.array(cells[f"A{cols}"][:2])
     yaw = float(np.degrees(np.arctan2(*(a12 - a1_)[::-1])))  # direction column 1 -> last (long side), about base z
-    # tray top from the dense depth on the walls (midpoints between neighbouring cells), not the height-peak
-    # guess: seen from above, the plug tops (1-2 cm higher) can form the higher peak
-    mids = []
-    for k_, (x_, y_, _) in cells.items():
-        c_ = int(k_[1:])
-        for nb in (f"{k_[0]}{c_ + 1}", f"{chr(ord(k_[0]) + 1)}{c_}"):
-            if nb in cells:
-                mids.append(0.5 * (np.array([x_, y_]) + np.array(cells[nb][:2])))
-    okw = np.isfinite(frame.xyz).all(-1)
-    Pw = apply_T(T_BC, frame.xyz[okw])
-    from scipy.spatial import cKDTree as _T
-
-    idx = sorted({i for lst in _T(Pw[:, :2]).query_ball_point(np.array(mids), 0.004) for i in lst})
-    zw = Pw[idx, 2]
-    zw = zw[np.abs(zw - z) < 0.03]
-    if len(zw) > 200:
-        z_wall = float(np.median(zw))
-        if abs(z_wall - z) > 0.004:
-            cells = {k_: [c[0], c[1], round(z_wall, 4)] for k_, c in cells.items()}
-            z = z_wall
     g = TrayGrid(True, "ok", cells, z, round(yaw, 2), v, outside)
     g.extra = {"cells_at_table_height": off, "cells_above_tray_top": above, "cells_seen": seen, "table_z": round(table_z, 4),
                "shifted_cells": shifted}
