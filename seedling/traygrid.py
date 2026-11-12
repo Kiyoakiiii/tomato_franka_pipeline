@@ -89,9 +89,16 @@ def z_scan_candidates(frame: Frame, T_BC: np.ndarray, cfg: dict, step: float = 0
     t2 = cv2.resize(t0, (t0.shape[1] // 2, t0.shape[0] // 2), interpolation=cv2.INTER_AREA)
     hist = tray_top_candidates(frame, T_BC, lo, hi, n=6)
 
+    views = {}
+
     def half(z):
-        I, _, _, _ = top_view(frame, T_BC, z, xr, yr, res=0.002)
-        return cv2.GaussianBlur(I, (0, 0), 0.5)
+        # one top view per height (the angle sweep below asked for it again for every angle: 501 views instead of
+        # 80 for one locate, ~2/3 of the full search's time, 2026-11-11)
+        z = float(z)
+        if z not in views:
+            I, _, _, _ = top_view(frame, T_BC, z, xr, yr, res=0.002)
+            views[z] = cv2.GaussianBlur(I, (0, 0), 0.5)
+        return views[z]
 
     # the angle: the coarse sweep at the histogram peaks (the angle barely depends on the height)
     ang0 = max((_match(half(z), t2, a)[0], a) for z in (hist[:3] or [(lo + hi) / 2]) for a in np.arange(-90.0, 90.0, 2.0))[1]
@@ -278,6 +285,12 @@ def locate_tray(frame: Frame, T_BC: np.ndarray, cfg: dict, prior: dict | None = 
 
     hz, ez = np.histogram(Pd[:, 2], bins=np.arange(-0.10, z - 0.03, 0.004))
     table_z = float(ez[int(np.argmax(hz))] + 0.002) if hz.sum() else z - 0.06
+    # the table from the whole picture (the overview is mostly table): the one above is looked for only 3 cm below the
+    # fitted top, so a fit at 2-3 cm (cell bottoms, the table itself) did not see the table at 1.4 cm and passed
+    # (2026-10-22, three turned trays "located" on the table; found by the overview replay 2026-11-11)
+    ha, ea = np.histogram(Pd[:, 2], bins=np.arange(-0.10, 0.40, 0.004))
+    table_all = float(ea[int(np.argmax(ha))] + 0.002)
+    table_share = float(np.mean(np.abs(Pd[:, 2] - table_all) < 0.006))
     tree = cKDTree(Pd[:, :2])
     # the plain (neither plant nor peat) points: on the tray these are the walls and cell bottoms, never above its
     # top; a grid shifted onto some higher dark object (a cloth, a box) has them well above the fitted top
@@ -361,13 +374,29 @@ def locate_tray(frame: Frame, T_BC: np.ndarray, cfg: dict, prior: dict | None = 
             shifted = best[1]
             seen, off, above = best[2]
             cells = best[3]
+            # how much of the MOVED tray lies outside the picture (it was worked out for the fit before the move:
+            # 2026-10-20, a tray with its near row out of the picture moved 2 rows onto the table beyond its far end,
+            # and passed as fully in view). Top view: rows along base x, columns along base y, 1 mm
+            d_ = shifted[0] * col + shifted[1] * row
+            r_ = ys_i + int(round(loc[1] + d_[0] * 1000.0))
+            c_ = xs_i + int(round(loc[0] + d_[1] * 1000.0))
+            inb = (r_ >= 0) & (r_ < valid.shape[0]) & (c_ >= 0) & (c_ < valid.shape[1])
+            vis = np.zeros(len(r_), bool)
+            vis[inb] = valid[r_[inb], c_[inb]]
+            outside = float(1.0 - vis.mean())
     a1_, a12 = np.array(cells["A1"][:2]), np.array(cells[f"A{cols}"][:2])
     yaw = float(np.degrees(np.arctan2(*(a12 - a1_)[::-1])))  # direction column 1 -> last (long side), about base z
     g = TrayGrid(True, "ok", cells, z, round(yaw, 2), v, outside)
     g.extra = {"cells_at_table_height": off, "cells_above_tray_top": above, "cells_seen": seen, "table_z": round(table_z, 4),
-               "shifted_cells": shifted}
+               "shifted_cells": shifted, "table_z_picture": round(table_all, 4), "table_share": round(table_share, 2)}
+    min_h = float(m.get("min_top_above_table_m", 0.035))
     if seen < 0.5 * len(cells):
         g.ok, g.status = False, f"only {seen} of {len(cells)} cells have depth: the tray is not (fully) in the picture"
+    elif prior is None and table_share > 0.15 and z < table_all + min_h:
+        # a tray is at least ~3.5 cm tall (cell depth + floor): every right fit of 2026-10-20..11-06 had its top 44 mm or
+        # more above the table, the wrong ones 16-32 mm
+        g.ok, g.status = False, (f"fitted tray top only {(z - table_all) * 1000:.0f} mm above the table (a tray is at least "
+                                 f"{min_h * 1000:.0f}): cell bottoms or the table, not the tray top")
     elif len(above) > 0.08 * seen:
         g.ok, g.status = False, f"{len(above)} fitted cells lie on something above the tray top (e.g. {above[:4]}): grid shifted off the tray, or wrong tray-top height"
     elif len(off) > 0.10 * seen or len(off) >= 3:

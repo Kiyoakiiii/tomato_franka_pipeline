@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """How general and how fast is the program? Random layouts (the tray and the disc each moved by a few cm and raised /
-lowered) are each simulated as a whole job (76 build: teaching, every plant's program with its observation pose and
+lowered) are each simulated as a whole job (plan.py build: teaching, every plant's program with its observation pose and
 turn, the placement; a full tray, an empty disc); the plants transplanted, the reasons plants were left, and the
 planning time are summed up. Planning only (no robot, no camera).
 
-    .venvs/pipeline/bin/python scripts/79_program_eval.py --n 12 --seed 1
+    .venvs/pipeline/bin/python scripts/program_eval.py --n 12 --seed 1
 """
 from __future__ import annotations
 
@@ -65,7 +65,7 @@ def main() -> int:
         dr, dl, dz, tr, tl, tz = lay
         d = ud * dr + ld * dl
         t = ut * tr + lt * tl
-        cmd = [sys.executable, "-u", "scripts/76_program.py", "build", "--reteach", "--grid", args.grid,
+        cmd = [sys.executable, "-u", "scripts/plan.py", "build", "--reteach", "--grid", args.grid,
                "--free", ",".join(str(h) for h in range(1, n_holes + 1)),
                f"--shift-disc={d[0]:.4f},{d[1]:.4f},{dz:.4f}", f"--shift-tray={t[0]:.4f},{t[1]:.4f},{tz:.4f}"]
         t0 = time.time()

@@ -24,7 +24,6 @@ for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
     os.environ.setdefault(_var, "4")
 
 # keep library caches/config inside the project (shared machine)
-os.environ.setdefault("YOLO_CONFIG_DIR", str(PROJECT_DIR / ".config" / "ultralytics"))
 os.environ.setdefault("MPLCONFIGDIR", str(PROJECT_DIR / ".cache" / "matplotlib"))
 os.environ.setdefault("TORCH_HOME", str(PROJECT_DIR / ".cache" / "torch"))
 os.environ.setdefault("XDG_CACHE_HOME", str(PROJECT_DIR / ".cache"))

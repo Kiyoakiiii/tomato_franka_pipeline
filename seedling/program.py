@@ -1,4 +1,4 @@
-"""The transplant job as an industrial pick-and-place program (2026-11-05, replacing the per-plant search of 65/71).
+"""The transplant job as an industrial pick-and-place program (2026-11-05, replacing the per-plant search of pick.py / place.py).
 
 Taught once per layout (after the tray and the disc are located):
 - one arm configuration for the whole job: the joint solution of a grasp in the middle of the plants that can grasp,
@@ -22,6 +22,7 @@ import numpy as np
 import os
 
 from . import cartesian, kinematics
+from .grasp import HEIGHT_EST, HEIGHT_LEAFY, HEIGHT_SURE, RIM, STANDOFF  # noqa: F401  (one place: seedling/grasp.py)
 from .transforms import inv_T, make_T
 
 _TEACH = None  # (program, candidates, ...) for the forked teaching processes
@@ -42,14 +43,9 @@ def _teach_eval(i):
             reach.append(k)
     return reach, self._teach_holes(tpl["lift"], below, world_disc, holes)
 
-# the geometry of the template (the values 65 / 71 used)
-STANDOFF = 0.060      # pre-grasp behind the grasp
+# the geometry of the template (the values pick.py / place.py used)
 STAGE_UP = 0.120      # stage above the pre-grasp
 LIFT = 0.100          # straight up after closing
-HEIGHT_EST = 0.035    # closing point above an estimated soil surface
-HEIGHT_SURE = 0.017   # ... above a soil surface measured close up
-HEIGHT_LEAFY = 0.0145
-RIM = 0.020           # closing point at least this far above the tray top
 PLUG = 0.040          # plug height
 ABOVE = 0.030         # plug bottom above the disc top before going in
 TRANSIT = 0.150       # plug bottom above the tray top while carrying
@@ -65,7 +61,7 @@ HEADINGS = [0.0] + [s_ * d_ for d_ in range(10, 180, 10) for s_ in (-1, 1)] + [1
 # a grasp deep in the tray may be made with the hand pitched down this much (and kept so until it lets go: the stem
 # stays upright): the wrist behind a flat hand is lower than its fingers and comes over the tray walls from the second
 # row on, so a flat grasp there had to be raised (2026-11-06: row D 27-50 mm above the soil). Only where the flat grasp
-# was raised; the flat one is always tried too (76 grasp_for_place). The user allowed 10 deg; 8 keeps the carry
+# was raised; the flat one is always tried too (plan.py grasp_for_place). The user allowed 10 deg; 8 keeps the carry
 # within MAX_TILT
 GRASP_PITCHES = (4.0, 8.0)
 
@@ -86,7 +82,7 @@ class Program:
         self.F, self.G = flange_to_ee(cfg), ee_to_contact(cfg)
         self.margin = float(cfg["robot"]["ik_joint_margin_rad"])
         self.fwd = float(cfg["gripper"]["pin_brake"].get("close_forward_m", 0.0))
-        # the closing point's shift from the cell centre, [along the approach, along the closing axis] in mm (as 65)
+        # the closing point's shift from the cell centre, [along the approach, along the closing axis] in mm (as pick.py)
         self.side_off = np.array(cfg.get("grasp", {}).get("side_offset_mm", [0.0, 0.0]), float) / 1000.0
         # where the stem sits in the closed hand: at the closing point, whatever offset the closing point was given (the
         # pins clamp the stem where they meet: 2026-11-06 the fingers met past the stem and missed it; 10 mm back they
@@ -136,22 +132,11 @@ class Program:
                 "pre": make_T(R, pre), "stage": make_T(R, pre + [0, 0, STAGE_UP]), "lift": make_T(R, grasp + [0, 0, LIFT])}
 
     def hand_clearance(self, cell: str, yaw: float, stems) -> float:
-        """how far the other plants' stems (cell centres) stay from what the open hand sweeps on its way in, in the
-        plane of the grasp: the open fingers (31 mm either side) from 15 mm past the stem to 75 mm behind it, the
-        gripper body (45 mm either side) behind that, the standoff added (as 65)"""
-        c = np.array(self.grid["cells"][cell][:2], float)
-        back = -np.array([np.cos(yaw), np.sin(yaw)])
-        lat_ax = np.array([-back[1], back[0]])
-        boxes = [(-0.015, 0.075, 0.031), (0.075, 0.18 + STANDOFF, 0.045)]
-        best = np.inf
-        for k in stems:
-            if k == cell:
-                continue
-            d = np.array(self.grid["cells"][k][:2], float) - c
-            s_, l_ = float(d @ back), abs(float(d @ lat_ax))
-            for s0, s1, hw in boxes:
-                best = min(best, float(np.hypot(max(0.0, s0 - s_, s_ - s1), max(0.0, l_ - hw))))
-        return best
+        """how far the other plants' stems (cell centres) stay from what the open hand sweeps on its way in
+        (seedling.grasp.hand_clearance, as pick.py)"""
+        from .grasp import hand_clearance
+
+        return hand_clearance(self.grid["cells"][cell], [self.grid["cells"][k] for k in stems if k != cell], yaw, STANDOFF)
 
     def grasp_joints(self, T_grasp, ci: int = 0, q_seed=None):
         """the grasp in configuration ci of the job (or from q_seed, a cell's own taught grasp): a straight move of the
@@ -168,7 +153,7 @@ class Program:
         return None
 
     def template(self, q_grasp, P):
-        """stage -> pre-grasp -> grasp -> lift as straight pieces, worked out backwards from the grasp (as 65)"""
+        """stage -> pre-grasp -> grasp -> lift as straight pieces, worked out backwards from the grasp (as pick.py)"""
         back, why = self.chain(q_grasp, [("pre-grasp", P["pre"]), ("stage", P["stage"])])
         if back is None:
             return None, why
@@ -388,3 +373,27 @@ class Program:
         self.configs = [{"q_ref": np.array(c["q_ref"]), "ref_T": np.array(c["ref_T"]), "ref": c["ref"], "posture": c["posture"],
                          "cells": list(c["cells"]), "hole_heading": {int(k): float(v) for k, v in c["hole_heading"].items()}}
                         for c in d.get("configs", [])]
+
+
+def make_check_pieces(T_FC, cfg: dict):
+    """check_pieces(world, q0, waypoints, **world.worst options) -> "" or why not: each straight joint piece clear of the
+    world (meshes) and of Franka's self-collision reflex (the hand at least tray.observe.min_self_clearance_m from the axes
+    of the arm's base, upper arm and forearm: wrist.self_clearance, as pick.py / place.py / the observation poses check it; the
+    program's paths did not, 2026-11-10). plan.py and tray_reach.py had a copy each until 2026-11-11"""
+    from .wrist import path_self_clearance
+
+    min_self = float(cfg["tray"].get("observe", {}).get("min_self_clearance_m", 0.09))
+
+    def check_pieces(world, q0, wps, **kw):
+        qa = np.asarray(q0, float)
+        for qb in wps:
+            m, where = world.worst(qa, qb, **kw)
+            if m < 0:
+                return f"{where} {m * 1000:+.0f} mm"
+            sc = path_self_clearance(qa, np.asarray(qb, float), T_FC, cfg)
+            if sc < min_self:
+                return f"hand {sc * 1000:.0f} mm from the arm's own axes (self-collision reflex below {min_self * 1000:.0f} mm)"
+            qa = qb
+        return ""
+
+    return check_pieces

@@ -1,7 +1,7 @@
 """The steps of a run executed in this process instead of one new process each (2026-11-10: a plant's cycle started ~10
 processes, each importing, loading the plan and the world model and connecting to the robot again).
 
-run_script("scripts/65_side_grasp.py", ["--cell", "C5", "approach"]) runs that script's main() here, with sys.argv set
+run_script("scripts/pick.py", ["--cell", "C5", "approach"]) runs that script's main() here, with sys.argv set
 as on the command line; the script's module is loaded once and kept (its imports and module-level work done once).
 The return value is what the process's exit code would have been: main()'s return value or SystemExit's code, 1 on an
 exception (its traceback printed). Set SEEDLING_SHARED_ROBOT for the robot connection to be shared too

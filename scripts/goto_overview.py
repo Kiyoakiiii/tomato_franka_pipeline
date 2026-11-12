@@ -4,9 +4,9 @@ as little as needed), then to the overview along a path (seedling.planner: strai
 clear of what is around (seedling.world: Franka's own link meshes, the camera, the gripper; the table, the tray and
 the disc as solid blocks, the plants in the tray and in the disc, the arm itself).
 
-    .venvs/pipeline/bin/python scripts/68_goto_overview.py --dry-run
-    .venvs/pipeline/bin/python scripts/68_goto_overview.py
-    .venvs/pipeline/bin/python scripts/68_goto_overview.py --after-place C7   # the plant just put into the disc counts too
+    .venvs/pipeline/bin/python scripts/goto_overview.py --dry-run
+    .venvs/pipeline/bin/python scripts/goto_overview.py
+    .venvs/pipeline/bin/python scripts/goto_overview.py --after-place C7   # the plant just put into the disc counts too
 """
 from __future__ import annotations
 

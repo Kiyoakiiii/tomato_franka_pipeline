@@ -234,7 +234,7 @@ def locate_disc(frame: Frame, T_BC: np.ndarray, area=(0.30, 0.95, -0.50, 0.50), 
 
 
 def taken_holes(disc: dict) -> list[int]:
-    """the holes with a plant in them: "occupied_holes" (a plant seen above it, or put there by us; 60 / 77 keep it)
+    """the holes with a plant in them: "occupied_holes" (a plant seen above it, or put there by us; locate.py / run.py keep it)
     when the file has it, else every hole not seen free. A hole that was not seen at all (out of view, hidden) is
     neither free nor taken then: no placing into it, and no plant assumed there (2026-11-05: an unseen H4 under the
     forearm's way blocked grasps for a plant that was not there)"""

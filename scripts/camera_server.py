@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-"""Keep the ZED open and hand out frames: the scripts of a run (60, 65) ask it for a picture over a UNIX socket
-instead of opening the camera themselves (each open + close took 3-20 s; 2026-11-04). 72 starts it and stops it;
+"""Keep the ZED open and hand out frames: the scripts of a run (locate.py, pick.py) ask it for a picture over a UNIX socket
+instead of opening the camera themselves (each open + close took 3-20 s; 2026-11-04). run.py starts it and stops it;
 with it running, seedling.camera.ZedCamera(cfg) connects to it (env SEEDLING_CAMERA_SOCK) instead of opening the
 camera. Nothing else may open the camera while it runs.
 
-    .venvs/pipeline/bin/python scripts/63_camera_server.py --sock .tmp/camera.sock
+    .venvs/pipeline/bin/python scripts/camera_server.py --sock .tmp/camera.sock
 """
 from __future__ import annotations
 

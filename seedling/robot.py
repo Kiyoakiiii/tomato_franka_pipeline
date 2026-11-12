@@ -172,7 +172,7 @@ def estimate_move_s(qa, qb, dyn) -> float:
 
 class StateSimRobot(RobotBase):
     """What FrankyRobot gives when SEEDLING_SIM_STATE names a JSON file (the whole-run simulation, scripts/80): the
-    joints live in that file, so the processes of a run (77 -> 69 -> 65 / 71 / 68) see one arm. Every joint move is
+    joints live in that file, so the processes of a run (run.py -> cycle.py -> pick.py / place.py / goto_overview.py) see one arm. Every joint move is
     checked against the world model of the current tray and disc files (every 2 deg) and logged with its smallest
     clearance; a move that goes more than 5 mm into something fails (as the real reflex would stop it)."""
 
@@ -257,7 +257,7 @@ class StateSimRobot(RobotBase):
         pass
 
 
-SHARED_ENV = "SEEDLING_SHARED_ROBOT"  # set by a run that executes its steps in one process (77 / 69 --inproc)
+SHARED_ENV = "SEEDLING_SHARED_ROBOT"  # set by a run that executes its steps in one process (run.py / cycle.py --inproc)
 _SHARED: dict = {}
 
 

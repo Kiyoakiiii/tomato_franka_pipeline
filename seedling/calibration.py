@@ -390,7 +390,7 @@ def save_T_FC(path: str | Path, T_FC: np.ndarray, meta: dict) -> Path:
 def load_T_FC(cfg: dict, path: str | Path | None = None) -> tuple[np.ndarray, dict]:
     path = project_path(path or cfg["camera"]["T_flange_cam_file"])
     if not path.exists():
-        raise FileNotFoundError(f"wrist camera calibration not found: {path}. Run scripts/32_wrist_calib_collect.py and 33_wrist_calib_solve.py.")
+        raise FileNotFoundError(f"wrist camera calibration not found: {path}. Run scripts/calib_collect.py and calib_solve.py.")
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     from . import kinematics
 

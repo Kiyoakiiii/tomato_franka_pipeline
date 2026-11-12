@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-"""Transplant run as an industrial program (seedling.program, scripts/76_program.py), 2026-11-05:
+"""Transplant run as an industrial program (seedling.program, scripts/plan.py), 2026-11-05:
 
-1. overview pose (68), one picture (60): the tray and the disc located ONCE (they do not move);
+1. overview pose (goto_overview.py), one picture (locate.py): the tray and the disc located ONCE (they do not move);
 2. the program: taught for this layout (or the one taught before, if the layout is the same), checked for the job;
 3. per plant, in the user's order (nearest row first, right to left) into the holes in the program's order (farthest
-   first): the template moved to its cell and hole (76 grasp / place, ~2 s, no search), then the cycle (69
+   first): the template moved to its cell and hole (plan.py grasp / place, ~2 s, no search), then the cycle (cycle.py
    --program --no-return): observe close up, the template at the measured soil height, pre-grasp, approach, close,
    lift, carry (the hand flat), insert, open, retreat; from there straight to the next plant's observation pose. After
    each plant its cell counts as empty and its hole as taken (written to the grid and disc files);
@@ -12,8 +12,8 @@
 
 touch experiments/grasp/STOP to stop between steps (never stop a script while the arm moves).
 
-    .venvs/pipeline/bin/python scripts/77_program_run.py --max-plants 3
-    .venvs/pipeline/bin/python scripts/77_program_run.py --no-locate   # the tray and disc as the last locate left them
+    .venvs/pipeline/bin/python scripts/run.py --max-plants 3
+    .venvs/pipeline/bin/python scripts/run.py --no-locate   # the tray and disc as the last locate left them
 """
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def main() -> int:
         if env is None and not args.subprocess:
             from seedling.inproc import run_script
 
-            argv = list(cmd[1:]) + (["--inproc"] if cmd[0] == "scripts/69_pick_cycle.py" else [])
+            argv = list(cmd[1:]) + (["--inproc"] if cmd[0] == "scripts/cycle.py" else [])
             if quiet:
                 return run_script(cmd[0], argv, quiet=True)
             return run_script(cmd[0], argv), ""
@@ -76,11 +76,11 @@ def main() -> int:
     if os.environ.get("SEEDLING_SIM_STATE"):
         # the whole-run simulation (scripts/80): no camera, no robot; the tray and disc files as they are
         return _run(args, cfg, gdir, stop, run, env_plan, sim=True)
-    # the camera kept open for the run (63); its output into a file
+    # the camera kept open for the run (camera_server.py); its output into a file
     sock = PROJECT_DIR / ".tmp" / "camera.sock"
     cam_log_path = PROJECT_DIR / ".tmp" / "camera_server.log"
     cam_log = open(cam_log_path, "w")
-    cam_srv = subprocess.Popen([py, "-u", "scripts/63_camera_server.py", "--sock", str(sock)], cwd=PROJECT_DIR,
+    cam_srv = subprocess.Popen([py, "-u", "scripts/camera_server.py", "--sock", str(sock)], cwd=PROJECT_DIR,
                                stdout=cam_log, stderr=subprocess.STDOUT, text=True)
 
     def camera_ready():
@@ -115,7 +115,7 @@ def _run(args, cfg, gdir, stop, run, env_plan, sim=False, camera_ready=None) -> 
     gf = PROJECT_DIR / cfg["tray"]["grid_file"]
     df = PROJECT_DIR / "calibration" / "disc.json"
     print(">>> overview and locate (once for the run)", flush=True)
-    if run(["scripts/68_goto_overview.py"])[0] != 0:
+    if run(["scripts/goto_overview.py"])[0] != 0:
         print("cannot go to the overview pose: stopped")
         return 1
     if camera_ready is not None:
@@ -131,7 +131,7 @@ def _run(args, cfg, gdir, stop, run, env_plan, sim=False, camera_ready=None) -> 
         out = (f"grid: the last locate as it is (--no-locate; file written {age:.0f} min ago), A1 {g0['cells']['A1'][:2]}, "
                f"top {g0.get('z_top', 0):.3f} m, plants in {sorted(g0.get('occupied', []))}")
     else:
-        rc, out = run(["scripts/60_tray_locate.py"], quiet=True)
+        rc, out = run(["scripts/locate.py"], quiet=True)
     print("\n".join(ln[:200] for ln in out.splitlines() if ln.startswith(("grid", "disc", "overlay", "CORRECTED", "REJECTED")) or "cells with" in ln))
     disc = json.loads(df.read_text())
     if rc != 0 or not disc.get("ok") or disc.get("ok_last_picture") is False:
@@ -142,7 +142,7 @@ def _run(args, cfg, gdir, stop, run, env_plan, sim=False, camera_ready=None) -> 
     pf = gdir / "program.json"
     t_launch = time.time()
     blog = open(PROJECT_DIR / ".tmp" / "program_build.log", "w")
-    build = subprocess.Popen([sys.executable, "-u", "scripts/76_program.py", "build", *(["--reteach"] if args.reteach else [])],
+    build = subprocess.Popen([sys.executable, "-u", "scripts/plan.py", "build", *(["--reteach"] if args.reteach else [])],
                              cwd=PROJECT_DIR, env=env_plan, stdout=blog, stderr=subprocess.STDOUT, text=True)
 
     def program():
@@ -177,7 +177,7 @@ def _run(args, cfg, gdir, stop, run, env_plan, sim=False, camera_ready=None) -> 
             pr = wait_for(k)
             if pr is None or k not in pr.get("cells", {}):
                 continue
-            rg, _o = run(["scripts/76_program.py", "grasp", "--cell", k, "--from-observe", *ig], quiet=True, env=env_plan)
+            rg, _o = run(["scripts/plan.py", "grasp", "--cell", k, "--from-observe", *ig], quiet=True, env=env_plan)
             if rg != 0:
                 continue
             # the hole the program meant for it first (the others' holes kept for them), then the other free ones
@@ -185,7 +185,7 @@ def _run(args, cfg, gdir, stop, run, env_plan, sim=False, camera_ready=None) -> 
             for hole in ([mine] if mine in free else []) + [h for h in free if h != mine]:
                 if hole in extra_taken:
                     continue
-                rp, _o = run(["scripts/76_program.py", "place", "--cell", k, "--hole", str(hole), *ig,
+                rp, _o = run(["scripts/plan.py", "place", "--cell", k, "--hole", str(hole), *ig,
                               *(["--taken", ",".join(map(str, extra_taken))] if extra_taken else [])], quiet=True, env=env_plan)
                 if rp == 0:
                     return (k, hole)
@@ -236,7 +236,7 @@ def _run(args, cfg, gdir, stop, run, env_plan, sim=False, camera_ready=None) -> 
                 chosen = choose(todo, free)
             if chosen is None:
                 print(f"no plant left the program takes into a free hole (plants {todo}, holes {free}): stopped")
-                print("  (scripts/78_layout_check.py tells how far to move the disc or the tray so that more of them work)")
+                print("  (scripts/layout_check.py tells how far to move the disc or the tray so that more of them work)")
                 end_check = True
                 break
             k, hole = chosen
@@ -254,7 +254,7 @@ def _run(args, cfg, gdir, stop, run, env_plan, sim=False, camera_ready=None) -> 
                 ahead["thread"] = threading.Thread(target=plan_ahead, daemon=True)
                 ahead["thread"].start()
             no_obs = (program() or {}).get("cells", {}).get(k, {}).get("observe") == "none"
-            rc, _ = run(["scripts/69_pick_cycle.py", "--cell", k, "--lift-mm", "100", "--place", str(hole), "--no-return", "--program",
+            rc, _ = run(["scripts/cycle.py", "--cell", k, "--lift-mm", "100", "--place", str(hole), "--no-return", "--program",
                          *(["--no-observe"] if no_obs else [])])
             if rc == 3:
                 print(f"the cycle for {k} found no safe plan after the close-up (nothing touched): {k} left, on with the next")
@@ -266,7 +266,7 @@ def _run(args, cfg, gdir, stop, run, env_plan, sim=False, camera_ready=None) -> 
             if rc != 0:
                 print(f"the cycle for {k} stopped (exit {rc}): stopped here, the arm is where that step left it")
                 break
-            try:  # the hole it went into (76 place takes another free one when the close-up moved the grasp)
+            try:  # the hole it went into (plan.py place takes another free one when the close-up moved the grasp)
                 hole = int(json.loads((gdir / f"{k}_place_plan.json").read_text())["hole"])
             except (OSError, ValueError, KeyError):
                 pass
@@ -290,8 +290,8 @@ def _run(args, cfg, gdir, stop, run, env_plan, sim=False, camera_ready=None) -> 
         print("the program:\n" + "\n".join(build_lines()))
     if end_check and placed and not stop.exists() and not sim:
         print(">>> back to the overview, one picture to check", flush=True)
-        if run(["scripts/68_goto_overview.py", "--after-place", placed[-1][0]])[0] == 0:
-            rc, out = run(["scripts/60_tray_locate.py"], quiet=True)
+        if run(["scripts/goto_overview.py", "--after-place", placed[-1][0]])[0] == 0:
+            rc, out = run(["scripts/locate.py"], quiet=True)
             grid, disc = json.loads(gf.read_text()), json.loads(df.read_text())
             if rc == 0 and disc.get("ok") and disc.get("ok_last_picture") is not False:
                 for k, hole in placed:

@@ -34,7 +34,7 @@ def test_the_plug_length_comes_from_the_lowest_soil_reading():
     shorter than it is reaches the disc before the hand is down)"""
     import importlib
 
-    m = importlib.import_module("76_program")
+    m = importlib.import_module("plan")
     grid = {"soil_z_overview": {"C8": 0.197}}
     obs = {"measure": {"ok": True, "soil_z": 0.215, "shift_mm": [1.0, 1.0]}}
     si = m.soil_info(grid, "C8", obs, 0.182)

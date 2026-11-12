@@ -31,7 +31,7 @@ Q_MAX = np.array([2.7437, 1.7837, 2.9007, -0.1518, 2.8065, 4.5169, 3.0159])
 Q_READY = np.array([0.0, -np.pi / 4, 0.0, -3 * np.pi / 4, 0.0, np.pi / 2, np.pi / 4])
 
 # Correction added to the REPORTED joint angles to get the ones this model needs (true geometry). Found by the
-# wrist-camera calibration (scripts/35_wrist_calib_eval.py --refit): 2026-10-13 joint 5 is off by ~1.1 deg, which no
+# wrist-camera calibration (scripts/calib_eval.py --refit): 2026-10-13 joint 5 is off by ~1.1 deg, which no
 # fixed camera mount can absorb. Set with set_joint_offsets (calibration.load_T_FC does it); zero = nominal model.
 JOINT_OFFSETS = np.zeros(7)
 

@@ -32,24 +32,19 @@ def main() -> int:
     cfg = config_from_args(args)
 
     print("== Python packages")
-    for mod in ["numpy", "scipy", "cv2", "skimage", "torch", "ultralytics", "franky", "serial", "open3d"]:
+    # what the pipeline imports (2026-11-11: torch / ultralytics / open3d dropped: the YOLO stem model is no longer used)
+    for mod in ["numpy", "scipy", "cv2", "yaml", "skimage", "pinocchio", "coal", "ompl", "franky", "serial"]:
         try:
             m = importlib.import_module(mod)
             line(True, f"{mod} {getattr(m, '__version__', '')}")
         except Exception as exc:
-            line(False if mod in {"numpy", "scipy", "cv2", "torch", "ultralytics", "franky"} else None, f"{mod}: {exc}")
-    try:
-        import torch
-
-        line(torch.cuda.is_available() or None, f"CUDA available: {torch.cuda.is_available()}")
-    except Exception:
-        pass
+            line(False, f"{mod}: {exc}")
     try:
         import pyzed.sl as sl
 
         line(True, f"pyzed (ZED SDK {sl.Camera.get_sdk_version()})")
     except Exception as exc:
-        line(False, f"pyzed: {exc}  -> 需要加入 zed 组并安装 pyzed（见 docs/pipeline_quickstart_CN.md）")
+        line(False, f"pyzed: {exc}  -> 需要加入 zed 组并安装 pyzed（tools/install_pyzed.sh）")
 
     print("\n== Account permissions")
     user = pwd.getpwuid(os.getuid()).pw_name
@@ -84,8 +79,8 @@ def main() -> int:
     print("\n== Project files")
     from seedling.config import project_path
 
-    line(project_path(cfg["perception"]["model"]).exists(), f"model {cfg['perception']['model']}")
-    line(project_path(cfg["camera"]["T_base_cam_file"]).exists() or None, f"camera extrinsics {cfg['camera']['T_base_cam_file']} (未标定前不存在属正常)")
+    cam_file = cfg["camera"]["T_flange_cam_file" if cfg["camera"].get("mount") == "wrist" else "T_base_cam_file"]
+    line(project_path(cam_file).exists(), f"camera calibration {cam_file} (calib_collect.py + calib_solve.py --save)")
 
     if args.robot:
         print("\n== Robot state (read only)")

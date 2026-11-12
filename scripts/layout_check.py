@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 """Where do the tray and the disc work best? The whole job (the plants now in the tray, an empty disc) is simulated
-with the program (76 build: teaching, each plant's program with its observation pose and turn, the placement) for the
+with the program (plan.py build: teaching, each plant's program with its observation pose and turn, the placement) for the
 layout as located and for the disc (or the tray) moved by a few centimetres; the table tells how many plants each
 layout transplants and which way to move what (a reachability analysis with the real program, 2026-11-05).
 Planning only (no robot, no camera); several layouts at a time.
 
-    .venvs/pipeline/bin/python scripts/78_layout_check.py            # the disc moved
-    .venvs/pipeline/bin/python scripts/78_layout_check.py --tray     # the tray moved
+    .venvs/pipeline/bin/python scripts/layout_check.py            # the disc moved
+    .venvs/pipeline/bin/python scripts/layout_check.py --tray     # the tray moved
 """
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def main() -> int:
         dr, dl, dz = cand
         d = u * dr / 100 + left * dl / 100
         shift = f"{d[0]:.4f},{d[1]:.4f},{dz / 100:.4f}"
-        cmd = [sys.executable, "-u", "scripts/76_program.py", "build", "--reteach", "--free", ",".join(str(h) for h in range(1, n_holes + 1)),
+        cmd = [sys.executable, "-u", "scripts/plan.py", "build", "--reteach", "--free", ",".join(str(h) for h in range(1, n_holes + 1)),
                ("--shift-tray=" if args.tray else "--shift-disc=") + shift]
         t0 = time.time()
         r = subprocess.run(cmd, cwd=PROJECT_DIR, capture_output=True, text=True, env=env)

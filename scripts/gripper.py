@@ -2,9 +2,9 @@
 """Pin-brake gripper, one command per call (the arm does not move). Parameters from configs/pipeline.yaml
 (gripper.pin_brake: stop pressure 3 kPa, nominal width 2 mm; the values tested on tomato stems).
 
-    .venvs/pipeline/bin/python scripts/66_gripper.py close    # close on the stem, then leave it closed
-    .venvs/pipeline/bin/python scripts/66_gripper.py open     # deflate, pump off, open
-    .venvs/pipeline/bin/python scripts/66_gripper.py status   # pressure for 2 s (does not move the fingers)
+    .venvs/pipeline/bin/python scripts/gripper.py close    # close on the stem, then leave it closed
+    .venvs/pipeline/bin/python scripts/gripper.py open     # deflate, pump off, open
+    .venvs/pipeline/bin/python scripts/gripper.py status   # pressure for 2 s (does not move the fingers)
 
 `close` leaves the gripper closed and the firmware keeps the brake pressurised (~100 kPa, the pump runs now and
 then: that is the noise) until `open`. The port is closed without dropping DTR, so the Arduino is not reset
@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import _common  # noqa: F401  (first: caps math threads, sets project paths)
 
-import termios
 import time
 
 from _common import base_parser, config_from_args
@@ -22,13 +21,7 @@ from _common import base_parser, config_from_args
 
 def detach(g) -> None:
     """Stop reading and close the port, keeping DTR as it is (no Arduino reset): the gripper stays as it is."""
-    ser = g.dev.ser
-    g.dev.running = False
-    time.sleep(0.2)
-    attrs = termios.tcgetattr(ser.fd)
-    attrs[2] &= ~termios.HUPCL
-    termios.tcsetattr(ser.fd, termios.TCSANOW, attrs)
-    ser.close()
+    g.detach(settle_s=0.2)
 
 
 def main() -> int:

@@ -2,15 +2,15 @@
 """One plant, the whole cycle, from the overview pose and back:
 observe (soil height of this plug) -> plan -> pre-grasp (turn high, go down) -> approach -> close -> lift
 -> [put back: lower -> open] -> retreat -> overview, or with --place: -> carry to the disc -> insert -> open
--> retreat -> overview (71_place_in_disc.py; the disc located by 60_tray_locate.py).
+-> retreat -> overview (place.py; the disc located by locate.py).
 
-Every step is a separate script (65 / 66 / 68) and stops the cycle if it fails or refuses. Between steps the
+Every step is a separate script (pick.py / gripper.py / goto_overview.py) and stops the cycle if it fails or refuses. Between steps the
 file experiments/grasp/STOP is checked: create it (touch) to stop after the current step, so that no motion is
 cut off in the middle (which puts the robot into an error state). The tray must have been located first
-(60_tray_locate.py, from the overview pose).
+(locate.py, from the overview pose).
 
-    .venvs/pipeline/bin/python scripts/69_pick_cycle.py --cell C5 --lift-mm 60 --put-back
-    .venvs/pipeline/bin/python scripts/69_pick_cycle.py --cell C5 --lift-mm 60 --place 1   # transplant into disc hole 1
+    .venvs/pipeline/bin/python scripts/cycle.py --cell C5 --lift-mm 60 --put-back
+    .venvs/pipeline/bin/python scripts/cycle.py --cell C5 --lift-mm 60 --place 1   # transplant into disc hole 1
     touch experiments/grasp/STOP          # stop after the current step
 """
 from __future__ import annotations
@@ -32,16 +32,16 @@ def main() -> int:
     ap.add_argument("--cell", required=True)
     ap.add_argument("--lift-mm", type=float, default=60.0)
     ap.add_argument("--put-back", action="store_true", help="after lifting, put the plant back and let go")
-    ap.add_argument("--pitch-deg", type=float, nargs="+", default=None, help="grasp pitches to try (65 plan; default from the config)")
-    ap.add_argument("--no-return", action="store_true", help="after placing, stay above the disc (72 goes straight on to the next "
+    ap.add_argument("--pitch-deg", type=float, nargs="+", default=None, help="grasp pitches to try (pick.py plan; default from the config)")
+    ap.add_argument("--no-return", action="store_true", help="after placing, stay above the disc (run.py goes straight on to the next "
                     "plant's observation pose; the tray and disc are located once per run)")
-    ap.add_argument("--program", action="store_true", help="the plan steps from the taught program (76 grasp / place: the "
+    ap.add_argument("--program", action="store_true", help="the plan steps from the taught program (plan.py grasp / place: the "
                     "template moved to this cell and hole, no search); needs --place HOLE")
     ap.add_argument("--no-observe", action="store_true", help="no close-up (the program has no observation pose for this "
                     "plant): grasped at the estimated height")
     ap.add_argument("--max-replans", type=int, default=2, help="grasp planned again (another pose) this often when no placement is found from it")
     ap.add_argument("--inproc", action="store_true", help="every step but the gripper's in this process (seedling.inproc: "
-                    "loaded and connected once; 77 runs its cycles so) instead of a new process each")
+                    "loaded and connected once; run.py runs its cycles so) instead of a new process each")
     ap.add_argument("--hold-s", type=float, default=0.5, help="pause at the top of the lift (2 s until 2026-11-02)")
     ap.add_argument("--place", type=int, nargs="?", const=0, default=None, metavar="HOLE",
                     help="transplant: put the plant into this disc hole (1..6; no number: the planner's choice)")
@@ -53,40 +53,40 @@ def main() -> int:
         stop.unlink()
     py = sys.executable
     c = ["--cell", args.cell]
-    steps = [("observe the plug", ["scripts/65_side_grasp.py", "observe", *c]),
-             ("plan", ["scripts/65_side_grasp.py", "plan", *c, "--lift-mm", str(args.lift_mm),
+    steps = [("observe the plug", ["scripts/pick.py", "observe", *c]),
+             ("plan", ["scripts/pick.py", "plan", *c, "--lift-mm", str(args.lift_mm),
                        *(["--pitch-deg", *map(str, args.pitch_deg)] if args.pitch_deg else [])]),
-             ("pre-grasp", ["scripts/65_side_grasp.py", "pregrasp", *c]),
-             ("approach", ["scripts/65_side_grasp.py", "approach", *c]),
-             ("close", ["scripts/66_gripper.py", "close"]),
-             ("lift", ["scripts/65_side_grasp.py", "lift", *c])]
+             ("pre-grasp", ["scripts/pick.py", "pregrasp", *c]),
+             ("approach", ["scripts/pick.py", "approach", *c]),
+             ("close", ["scripts/gripper.py", "close"]),
+             ("lift", ["scripts/pick.py", "lift", *c])]
     if args.no_observe:
-        # no close-up: from the overview pose, as the program checked the turn from there (76 build)
-        steps = [("to the overview", ["scripts/68_goto_overview.py"])] + steps[1:]
+        # no close-up: from the overview pose, as the program checked the turn from there (plan.py build)
+        steps = [("to the overview", ["scripts/goto_overview.py"])] + steps[1:]
     if args.program:
         if not args.place:
             print("--program needs --place HOLE")
             return 1
-        steps[[n for n, _ in steps].index("plan")] = ("plan", ["scripts/76_program.py", "grasp", *c, "--hole", str(args.place)])
+        steps[[n for n, _ in steps].index("plan")] = ("plan", ["scripts/plan.py", "grasp", *c, "--hole", str(args.place)])
         args.max_replans = 0
     if args.place is not None:
         h = [] if args.place == 0 else ["--hole", str(args.place)]
         # the place plan right after the grasp plan: refuse before touching the plant if the hole is out of reach
-        steps.insert([n for n, _ in steps].index("plan") + 1, ("plan the placement", ["scripts/76_program.py", "place", *c, *h, "--other-holes"] if args.program
-                         else ["scripts/71_place_in_disc.py", "plan", *c, *h]))
-        steps += [("carry to the disc", ["scripts/71_place_in_disc.py", "carry", *c]),
-                  ("insert into the hole", ["scripts/71_place_in_disc.py", "insert", *c]),
-                  ("open", ["scripts/66_gripper.py", "open"]),
-                  ("retreat", ["scripts/71_place_in_disc.py", "retreat", *c])]
+        steps.insert([n for n, _ in steps].index("plan") + 1, ("plan the placement", ["scripts/plan.py", "place", *c, *h, "--other-holes"] if args.program
+                         else ["scripts/place.py", "plan", *c, *h]))
+        steps += [("carry to the disc", ["scripts/place.py", "carry", *c]),
+                  ("insert into the hole", ["scripts/place.py", "insert", *c]),
+                  ("open", ["scripts/gripper.py", "open"]),
+                  ("retreat", ["scripts/place.py", "retreat", *c])]
         if not args.no_return:
-            steps += [("back to the overview", ["scripts/68_goto_overview.py", "--after-place", args.cell])]
+            steps += [("back to the overview", ["scripts/goto_overview.py", "--after-place", args.cell])]
     elif args.put_back:
-        steps += [("put back", ["scripts/65_side_grasp.py", "lower", *c]),
-                  ("open", ["scripts/66_gripper.py", "open"]),
-                  ("retreat", ["scripts/65_side_grasp.py", "retreat", *c]),
-                  ("back to the overview", ["scripts/68_goto_overview.py"])]
+        steps += [("put back", ["scripts/pick.py", "lower", *c]),
+                  ("open", ["scripts/gripper.py", "open"]),
+                  ("retreat", ["scripts/pick.py", "retreat", *c]),
+                  ("back to the overview", ["scripts/goto_overview.py"])]
     gdir = PROJECT_DIR / "experiments" / "grasp"
-    npf = gdir / f"{args.cell}_no_place.json"  # kept from the selection (72 clears it when it plans this plant)
+    npf = gdir / f"{args.cell}_no_place.json"  # kept from the selection (run.py clears it when it plans this plant)
     replans = 0
     import os
 
@@ -95,7 +95,7 @@ def main() -> int:
     def run_step(cmd):
         """one step: its exit code (in this process with --inproc, the gripper's always in its own process: its code and
         how it is driven are left as they are)"""
-        if args.inproc and cmd[0] != "scripts/66_gripper.py":
+        if args.inproc and cmd[0] != "scripts/gripper.py":
             from seedling.inproc import run_script
 
             return run_script(cmd[0], cmd[1:])
@@ -106,7 +106,7 @@ def main() -> int:
             print(f"STOPPED before step {i} ({name}) on request")
             return 2
         print(f">>> step {i}/{len(steps)}: {name}", flush=True)
-        if sim and cmd[0] == "scripts/66_gripper.py":
+        if sim and cmd[0] == "scripts/gripper.py":
             print("(simulated: no gripper)")
             if os.environ.get("SEEDLING_SIM_REALTIME"):
                 time.sleep(1.2)  # the pin-brake gripper closes / opens in ~1.1 s (2026-10-15)
@@ -117,7 +117,7 @@ def main() -> int:
         t_steps[name] = round(time.time() - t_s, 2)
         while rc != 0 and name == "plan the placement" and replans < args.max_replans:
             # no placement from this grasp pose (the hand stays flat while carrying: the grasp's joint configuration
-            # decides): another grasp pose (65 leaves out the ones in {cell}_no_place.json), then the placement again
+            # decides): another grasp pose (pick.py leaves out the ones in {cell}_no_place.json), then the placement again
             replans += 1
             avoid = json.loads(npf.read_text()) if npf.exists() else []
             avoid.append(json.loads((gdir / f"{args.cell}_side_plan.json").read_text())["q"]["grasp"])
@@ -128,7 +128,7 @@ def main() -> int:
             rc = run_step(cmd)
         if rc != 0:
             print(f"step {i} ({name}) failed or refused (exit {rc}): cycle stopped", flush=True)
-            # exit 3: no plan, the plant not touched (the arm at most at the observation pose): 72 goes on with another
+            # exit 3: no plan, the plant not touched (the arm at most at the observation pose): run.py goes on with another
             # (the close-up too: the arm only went to the observation pose, or did not move; "no safe way there" is this
             # plant's alone)
             return 3 if name in ("observe the plug", "plan", "plan the placement") else 1

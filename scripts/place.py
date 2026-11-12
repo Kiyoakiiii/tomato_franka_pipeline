@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-"""Put the held plant into a hole of the transplant disc (calibration/disc.json from 60_tray_locate.py), after
-65_side_grasp.py has grasped and lifted it. The gripper keeps its side-grasp attitude (pitched down from the
+"""Put the held plant into a hole of the transplant disc (calibration/disc.json from locate.py), after
+pick.py has grasped and lifted it. The gripper keeps its side-grasp attitude (pitched down from the
 robot side); only its heading turns to point at the hole.
 
     plan     (any time after the grasp plan): the poses below, checked; refuses if anything is unsafe
@@ -12,7 +12,7 @@ Held geometry: the stem is held at the grasp plan's closing point; the plug hang
 (closing point - soil surface) + --plug-mm lower. The fingers' bottom (14.5 mm below the closing point) stays
 above the disc top.
 
-    .venvs/pipeline/bin/python scripts/71_place_in_disc.py plan --cell C5 [--hole 3]
+    .venvs/pipeline/bin/python scripts/place.py plan --cell C5 [--hole 3]
 """
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ def main() -> int:
     ap.add_argument("--placed-plant-mm", type=float, default=150.0, help="plants already in the disc: this tall above the disc top")
     ap.add_argument("--placed-plant-radius-mm", type=float, default=40.0, help="... and the hand keeps this far from their stems")
     ap.add_argument("--camera-clearance-mm", type=float, default=20.0)
-    ap.add_argument("--self-clearance-mm", type=float, default=90.0, help="hand from the arm's own upper arm and forearm (see 65)")
+    ap.add_argument("--self-clearance-mm", type=float, default=90.0, help="hand from the arm's own upper arm and forearm (see pick.py)")
     ap.add_argument("--path-time-s", type=float, default=12.0, help="random-tree path search time for the carry across (all holes "
                     "and headings together; each search at most a quarter of it), when no straight or one-via path is safe")
     ap.add_argument("--max-tilt-deg", type=float, default=10.0, help="while the plant is held, the hand at most this far from flat "
@@ -323,7 +323,7 @@ def main() -> int:
                     o_, l_c = piece_lines("carry", q_up, path, w_carry)
                 tl = max(cartesian.max_tilt_between(a_, b_, F, G) for a_, b_ in zip([q_up] + list(path[:-1]), path))
                 l_c.append(f"  carry     : the hand at most {tl:.1f} deg from flat (limit {args.max_tilt_deg:g})")
-                # the way back to the overview after letting go (as 68 will plan it)
+                # the way back to the overview after letting go (as goto_overview.py will plan it)
                 back_steps, back_msg = lift_then_plan(qa_, q_ov, w_after, cfg, lifts_m=(0.0, 0.10), time_s=2.0)
                 if back_steps is None:
                     why_.append(f"H{hi + 1}: no safe way back to the overview ({back_msg})")

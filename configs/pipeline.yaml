@@ -38,6 +38,10 @@ gripper:
   pin_brake:                    # 仅 type=pin_brake：驱动是项目根目录的 example_pinBrakeGripper.py（同学提供）
     # 固定填夹爪的 CH340。null 会逐个打开所有 USB 串口找固件 banner，打开串口会让别人的 Arduino 复位，共享电脑上不要用
     port: /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0
+    # 快速连接（2026-11-11 加，未在硬件上验证，默认关）：串口没复位时不等 3 s banner（发 s 看有没有压力帧），并把张开/闭合状态
+    # 写进 .tmp/pin_brake_state.json 交给下一步，合爪前不再先张开一次（2.8 s）。日志估计每株省 10–13 s。
+    # 验证：gripper.py open / close / open 各跑一次看用时和动作是否正常，再跑一株
+    fast_connect: false
     pressure_kpa: 3.0           # 停止压力（同学在番茄茎上测得：p 3）
     close_width_mm: 2.0         # close 的名义宽度（同学测得：close 2），不随估计茎径变化
     min_brake_kpa: 25.0         # 合爪 1 s 后刹车压力低于此值判为失败（默认 40）；2026-11-06 用户要求降到 25（下午只到约 37 kPa，苗是夹住的）
@@ -45,7 +49,6 @@ gripper:
     close_forward_m: 0.028      # 夹茎时两指合拢点沿夹爪轴（G 的 z）比张开时的指间中心前移约 13 mm（2026-10-22 实夹 C7：
                                 # 补偿 25 mm 时靠后没夹住，13 mm 正好夹住；空夹会转到底，前移 27 mm）。张开时 G 停在茎后方这么远
     # 闭合后固件保压约 100 kPa、气泵间歇工作有响声，是正常行为（同学确认）
-  grasp_width_m: 0.0            # grasp() 目标宽度；0 表示用估计茎径
   grasp_speed_m_s: 0.02
   grasp_force_n: 20.0           # [待测] Franka Hand 力控精度在低力段有限，需夹持实验确定
   epsilon_inner_m: 0.006
@@ -72,39 +75,16 @@ camera:
   average_frames: 5             # 观测时多帧 XYZ 取中值，降低噪声
   flush_frames: 3               # 每次拍照先丢弃的帧数（手上相机刚停下时缓冲区里可能还是移动中的旧帧）
   # 双目偏差修正：校正图像上的视差比真实值大这么多像素（稠密深度和茎线三角化都用）。2026-10-12 用 99 个标记
-  # （PnP，0.32–0.45 m）测得 19.2 px（不修正时深度短约 5.5%）；SDK 开机自校准可能改变它，34_wrist_calib_check.py 每次会重估。
+  # （PnP，0.32–0.45 m）测得 19.2 px（不修正时深度短约 5.5%）；SDK 开机自校准可能改变它，calib_check.py 每次会重估。
   # 2026-10-20（相机重装、重启后）三组标定数据分别估计 17.0 / 15.3 / 15.2 px -> 15.8（1 px 约等于 0.36 m 处 1 mm 深度）
   # 2026-11-06（相机、夹爪重装并重标定后）：用已知高度离线扫描（桌面 = 0、圆盘顶面约 58–60 mm），13.0 时桌面 +3 mm、圆盘 57 mm；
-  # 15.8 时桌面 -9、圆盘 47（低了 1 cm，撞到土块）。34_wrist_calib_check.py 的估计（21.5/22.8）方向反了，别用
+  # 15.8 时桌面 -9、圆盘 47（低了 1 cm，撞到土块）。calib_check.py 的估计（21.5/22.8）方向反了，别用
   disparity_offset_px: 13.0
   # 相机外壳（含支架余量）在左相机坐标系下的包围盒 [x, y, z] 范围（m）。ZED 2i 175×30×43 mm，左目在外壳中心左侧 60 mm
   housing_box_m: [[-0.045, 0.165], [-0.03, 0.03], [-0.06, 0.01]]
   mount: wrist                  # wrist = 装在机械臂手腕上（随臂移动）；fixed = 固定在外部
-  T_flange_cam_file: calibration/T_flange_cam.yaml   # mount=wrist：相机相对法兰（32/33 脚本生成）
-  T_base_cam_file: calibration/T_base_cam.yaml       # mount=fixed：相机相对基座（30/31 脚本生成）
-
-perception:
-  model: models/stem_yolo11n_v3_clean_one_stem.pt
-  conf: 0.25
-  imgsz: 960
-  device: auto                  # auto | cpu | 0
-  max_instances: 6
-  roi_px: null                  # [x0, y0, x1, y1] 只在托盘工作区内找茎（可选，来自固定安装）
-  # --- 中心线与分段 ---
-  min_mask_area_px: 150
-  segment_length_px: 60         # 每个候选段的图像长度（沿骨架）
-  segment_step_px: 20
-  max_bend_deg: 25.0            # 段内二维弯曲超过此值则拒绝
-  # --- 三维拟合 ---
-  max_point_confidence: 60      # 只用置信度 <= 此值的像素（与 camera.confidence_threshold 配合）
-  depth_jump_m: 0.015           # 与段内深度中值相差超过此值的点视为背景/遮挡污染
-  ransac_threshold_m: 0.003
-  ransac_iterations: 200
-  min_support_points: 25
-  min_inlier_ratio: 0.5
-  max_rms_m: 0.003
-  min_length_m: 0.012
-  surface_to_axis: true         # 把可见表面点沿视线后移半个茎径，近似茎轴
+  T_flange_cam_file: calibration/T_flange_cam.yaml   # mount=wrist：相机相对法兰（calib_collect.py / calib_solve.py 生成）
+  T_base_cam_file: calibration/T_base_cam.yaml       # mount=fixed：相机相对基座（固定安装的标定脚本已删，见 git 历史 2026-11-10 之前）
 
 stemline:                       # 茎线双目三角化（seedling/stemline.py）：左右校正图像里找茎中心线再三角化，不依赖稠密深度
   exg_threshold: 0.05           # 绿色判定 ExG = (2g-r-b)/(r+g+b)，同时要求色相和饱和度（排除木头、橙色）
@@ -124,21 +104,16 @@ stemline:                       # 茎线双目三角化（seedling/stemline.py�
   max_disparity_resid_px: 1.0   # 分段（每 9 行）单独匹配的视差与整体拟合之差的 RMS 上限，超过则认为匹配不可信
   grasp_offset_m: 0.02          # 夹取点：从茎根沿茎向上的距离
 
-stembase:                       # 穴位里茎出土的那一小段（seedling/stembase.py）：只看土面上方一点，避开叶子和叶柄
-  base_radius_m: 0.015          # 以穴位中心为轴的搜索半径（苗种在土块中心附近）
-  base_z_m: [0.003, 0.025]      # 土面以上这段高度（这批苗的叶子多在 4 cm 以上）
-  min_width_m: 0.0012           # 茎宽范围（图像中的亮细线）
-  max_width_m: 0.006
-  min_contrast: 15              # 白顶帽（比两侧泥土亮）灰度下限
-  max_image_tilt_deg: 50        # 图里转正后，茎段与竖直方向夹角上限
-  min_rows_fraction: 0.6        # 茎段在图里至少有按视角算出的应有长度的这么多
-  max_tilt_deg: 50              # 三维倾角上限
-
 grasp:
-  # 侧向夹取（scripts/65_side_grasp.py）：合拢点相对穴位中心的偏移 [沿接近方向(水平), 沿闭合轴] mm。
+  # 侧向夹取（scripts/pick.py）：合拢点相对穴位中心的偏移 [沿接近方向(水平), 沿闭合轴] mm。
   # 2026-10-22 第一次夹 C6 需往 C7 方向 10 mm（= 沿闭合轴 +10）；第二株 C7 带着这 10 mm 横向居中、正好夹住 -> 当作固定偏移
   # 2026-11-06 的 -10 mm 是在补偿重装后没重标的相机，相机重新标定后撤回 0
   side_offset_mm: [0.0, 0.0]
+  # 近距离重新定位穴位（seedling/closeup.py：观察位的深度里匹配周围 5×5 格的格壁，搜索范围不到半格）。
+  # log = 只记录在 <cell>_observe.json 的 closeup_xy 里，仍按总览坐标夹取；apply = 按近距离的穴位中心夹取。
+  # 2026-11-11 离线：近距离和总览差 1–10 mm（11-06 重新标定后），两者各自重复性约 1 mm；哪个更准要在实验室用 point_check.py 指一下确认后再改成 apply
+  closeup_xy: log
+  closeup_max_shift_mm: 15.0     # 近距离移动超过这么多就不用（多半是标定或匹配有问题）
   # 侧向夹取的向下倾角（度），按顺序尝试，第一个安全的胜出。教授要求必须平行夹取（手指与托盘平行）-> 只用 0。
   # 想在平放不行时退回倾斜夹取，可以改成 [0, 10, 15, 20, 26]（2026-11-02 之前固定 26）
   side_pitch_deg: [0]
@@ -148,39 +123,11 @@ grasp:
   max_posture_deg: 180          # 姿态上限（2026-11-04 用户选：优先最自然的，没有就用扭转最少的安全姿势，所以不设硬上限；想禁止翻腕就改成 60）。原注释：底座偏离苗的方向、肘侧摆（关节3）、手腕扭转（关节5）都不超过它；超过就报告“这里平夹不了”，不去做（2026-11-04：近处平夹要翻腕、单关节转 183°）
   side_wrist_clearance_mm: 20   # 机械臂外壳（FR3 官方碰撞网格，连杆 3-7）、法兰、夹爪本体离下方托盘顶面的最小距离
   side_wrist_clearance_off_tray_mm: 20   # 同上，托盘以外（圆盘、桌面）。2026-11-04 起检查的是外壳表面，不再是手腕关节中心（原来中心要 70 mm，仍让前臂外壳碰到了圆盘）
-  # 侧向接近方向：相对“基座原点指向目标”的水平方向的偏航角，以及向下倾角
-  approach_yaw_offsets_deg: [0, -25, 25]
-  approach_pitch_deg: [30, 45]  # 水平接近(0°)时 FR3 第 6 关节接近上限，多数位置不可达
-  pregrasp_distance_m: 0.08     # 预抓取点沿接近方向后退距离
-  max_stem_tilt_deg: 35         # 茎相对竖直方向倾斜超过此值不抓
   table_z_m: 0.0                # 托盘/台面上表面在基座坐标的高度 [待测]
-  min_contact_height_m: 0.015   # 接触中心最少高于 table_z
-  finger_half_height_m: 0.009   # 手指在茎方向上的半高（用于离地检查）[按夹垫实测]
-  finger_depth_m: 0.02          # 手指沿接近方向的长度
-  finger_thickness_m: 0.008
-  clearance_points_max: 30      # 手指扫掠体内允许的非目标点数
   max_stem_diameter_m: 0.012
-  default_stem_diameter_m: 0.004
-
-task:
-  max_attempts: 2               # 每株最多尝试次数（含首次）
-  reobserve_before_acquire: true
-  pregrasp_joint_motion: true  # 从 home 到预抓取用关节空间运动（大幅转姿态时比笛卡尔直线稳妥）
-  reobserve_max_shift_m: 0.006  # 再观察目标位移超过此值则重新规划
-  guard_force_limit_n: 15.0     # 接近/运输/放置时意外接触的外力阈值（相对动作开始时的基线）[待测]
-  verify_extraction_visual: true  # 拔出后重新拍照，检查原位置是否还有茎
-  extraction_height_m: 0.08
-  extraction_steps: 4
-  extraction_force_limit_n: 30.0  # 外力估计超过此值则停止拔出（臂端估计，不是茎受力）[待测]
-  transport_height_m: 0.30
-  transport_waypoints_m: []     # 运输中间点 [[x,y,z], ...]，按实际障碍物添加
-  place_position_m: [0.45, -0.30, 0.10]   # 接收杯/穴位内释放时接触中心位置 [待测]
-  place_approach_height_m: 0.12           # 在接收位上方此高度开始下降
-  release_dwell_s: 0.5
 
 tray:
-  file: calibration/tray.yaml   # 旧的示教托盘（45_teach_tray.py，已归档）；现在用 grid_file
-  model:                        # 托盘穴位分布（固定）；托盘位置每次由 scripts/60_tray_locate.py 从一张照片求（seedling/traygrid.py）
+  model:                        # 托盘穴位分布（固定）；托盘位置每次由 scripts/locate.py 从一张照片求（seedling/traygrid.py）
     rows: 6
     cols: 12                    # 72 穴；A 行离机械臂最近，第 1 列在机械臂左手边
     pitch_m: 0.0448             # 2026-10-20 由照片拟合（横竖相同）[可用尺子量 5 格再核对]
@@ -192,10 +139,7 @@ tray:
     max_outside: 0.03           # 拟合出的托盘超出画面的比例上限（错开一整格约 8%；另有"格子在桌面高度"检查防止往画面内错开）
     min_score: 0.5
   grid_file: calibration/tray_grid.json   # 最近一次定位的 72 个穴位坐标
-  overview_q: [0.086, -1.095, -0.163, -2.261, -0.167, 1.714, 0.710]   # 总览姿态（70_overview_for_area.py --area 0.40 0.92 -0.32 0.32 --area-z 0 0.32：相机 0.77 m 高、从机械臂一侧斜着俯视 60°，垫高到 0.30 m 的托盘和圆盘都在画面里）；之前 [0.082, -1.027, -0.154, -2.149, -0.160, 1.496, 0.698]（俯视 70°，垫高后托盘远端出了画面）
-  # 托盘模式的接近方向（相对“基座指向穴位”的水平方向）；只用 0 偏航，避免手指斜扫过相邻未拔的苗
-  approach_yaw_offsets_deg: [0]
-  approach_pitch_deg: [45, 60]  # 仿真 IK：30° 只有 x≥0.55 m 才可达；45°/60° 在 x=0.40–0.60 m 都可达
+  overview_q: [0.086, -1.095, -0.163, -2.261, -0.167, 1.714, 0.710]   # 总览姿态（find_overview_pose.py --area 0.40 0.92 -0.32 0.32 --area-z 0 0.32：相机 0.77 m 高、从机械臂一侧斜着俯视 60°，垫高到 0.30 m 的托盘和圆盘都在画面里）；之前 [0.082, -1.027, -0.154, -2.149, -0.160, 1.496, 0.698]（俯视 70°，垫高后托盘远端出了画面）
   observe:                      # 手上相机：每个穴位先移到斜上方的观察位，静止后拍照
     distance_m: 0.42            # 相机到穴位夹取点的距离（ZED 最近 0.3 m）
     elevation_deg: [55, 65, 45] # 视线向下的角度（0 = 水平，90 = 正上方），按顺序尝试
@@ -206,19 +150,3 @@ tray:
     joint_range_rad: {5: [-0.5, 0.6], 7: [-0.75, 2.65]}
     max_joint_step_deg: 90      # 从当前姿态出发任一关节变化超过此值则换下一个候选
     settle_s: 0.5
-  vision:                       # 逐穴位视觉修正（无需训练模型）
-    base_radius_m: 0.02         # 茎在基质处的落点必须在穴位中心这个半径内 [约 0.4 × 穴距]
-                                # 取点区域是自此半径向上按 max_tilt_deg 张开的锥形
-    band_low_m: 0.008           # 只看基质表面以上这一段高度内的点（避开基质和高处叶片）
-    band_high_m: 0.06
-    refine_soil: true           # 用穴位内最低的稠密点层修正基质表面高度
-    green_filter: true          # ExG = 2g - r - b（归一化色度）阈值分出绿色茎
-    exg_threshold: 0.08         # [按现场光照调]
-    min_brightness: 60
-    min_points: 15
-    min_vertical_span_m: 0.015  # 点的高度跨度不足时只估位置，不估倾斜
-    ransac_threshold_m: 0.003
-    max_tilt_deg: 40
-    max_correction_m: 0.03      # 修正量超过此值视为误检
-    fallback: nominal           # 视觉失败时：nominal = 按示教位置夹；reject = 跳过该穴位
-    save_frames: true

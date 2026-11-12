@@ -6,7 +6,7 @@ Works with one marker (calibration/aruco_marker_A4.pdf, 100 mm) or a sheet of se
 
 Preparation
   1. Tape the sheet flat on the table near the tray. It must not move during the whole collection.
-  2. Bring the robot (hand guiding or 21_robot_jog.py) so the camera looks at the sheet from ~0.3-0.5 m.
+  2. Bring the robot (hand guiding or robot_jog.py) so the camera looks at the sheet from ~0.3-0.5 m.
      This start pose is also the lowest the camera will go.
 
 What the script does
@@ -17,13 +17,13 @@ What the script does
     is skipped), joint path checked for height, slow joint motion, settle, 3-frame capture
   - returns to the start pose at the end. Ctrl+C stops where the robot is (no return move).
 
-    .venvs/pipeline/bin/python scripts/32_wrist_calib_collect.py --marker-mm 40
+    .venvs/pipeline/bin/python scripts/calib_collect.py --marker-mm 40
 
 A second session under the working conditions (sheet on the raised tray next to the seedlings, oblique start
 pose) to test / extend an existing calibration: no probe phase, the sheet is located with the current one.
-    .venvs/pipeline/bin/python scripts/32_wrist_calib_collect.py --marker-mm 40 --use-calib --max-angle-deg 25 --dry-run
-    .venvs/pipeline/bin/python scripts/32_wrist_calib_collect.py --marker-mm 40 --use-calib --max-angle-deg 25
-    .venvs/pipeline/bin/python scripts/35_wrist_calib_eval.py calibration/sessions/wrist_<new>
+    .venvs/pipeline/bin/python scripts/calib_collect.py --marker-mm 40 --use-calib --max-angle-deg 25 --dry-run
+    .venvs/pipeline/bin/python scripts/calib_collect.py --marker-mm 40 --use-calib --max-angle-deg 25
+    .venvs/pipeline/bin/python scripts/calib_eval.py calibration/sessions/wrist_<new>
 """
 from __future__ import annotations
 
@@ -234,7 +234,7 @@ def main() -> int:
     if args.dry_run:
         return 0
     print(f"\n{len(samples)} samples saved in {out}")
-    print(f"next: .venvs/pipeline/bin/python scripts/33_wrist_calib_solve.py {out.relative_to(PROJECT_DIR)} --save")
+    print(f"next: .venvs/pipeline/bin/python scripts/calib_solve.py {out.relative_to(PROJECT_DIR)} --save")
     return 0
 
 

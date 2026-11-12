@@ -9,8 +9,8 @@ the markers there. That held-out number, not the fit residual, is the accuracy e
   PnP 3-D mm   = marker centre from that sample's own PnP vs the fitted position (includes PnP depth noise,
                  so it is pessimistic for small markers)
 
-    .venvs/pipeline/bin/python scripts/33_wrist_calib_solve.py calibration/sessions/wrist_<id> --save
-    .venvs/pipeline/bin/python scripts/33_wrist_calib_solve.py --synthetic     # self-test, no hardware
+    .venvs/pipeline/bin/python scripts/calib_solve.py calibration/sessions/wrist_<id> --save
+    .venvs/pipeline/bin/python scripts/calib_solve.py --synthetic     # self-test, no hardware
 """
 from __future__ import annotations
 

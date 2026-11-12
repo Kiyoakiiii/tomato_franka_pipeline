@@ -6,10 +6,11 @@ Point the closed fingers at a disc hole centre or a tray cell centre (no plant h
 hand's closing point lands from where the program aims: the closing point (where the pins meet) is put above the
 target, the hand flat with the heading the program uses there, then the script stops and the arm stays put.
 
-    .venvs/pipeline/bin/python scripts/81_point_check.py H2 --dry-run
-    .venvs/pipeline/bin/python scripts/81_point_check.py H2                 # above hole 2, 25 mm over the disc top
-    .venvs/pipeline/bin/python scripts/81_point_check.py C9 --height-mm 40   # above cell C9, 40 mm over the tray top
-    .venvs/pipeline/bin/python scripts/81_point_check.py back                # straight up, then to the overview
+    .venvs/pipeline/bin/python scripts/point_check.py H2 --dry-run
+    .venvs/pipeline/bin/python scripts/point_check.py H2                 # above hole 2, 25 mm over the disc top
+    .venvs/pipeline/bin/python scripts/point_check.py C9 --height-mm 40   # above cell C9, 40 mm over the tray top
+    .venvs/pipeline/bin/python scripts/point_check.py C9 --height-mm 40 --closeup   # where the close-up put C9
+    .venvs/pipeline/bin/python scripts/point_check.py back                # straight up, then to the overview
 
 Uses calibration/tray_grid.json and calibration/disc.json as the last locate left them (the run locates first).
 """
@@ -34,6 +35,8 @@ def main() -> int:
     ap.add_argument("--down", action="store_true", help="the hand pointing straight down, the gripper OPEN: the open gap "
                     "centre over the target (its xy does not depend on the finger length); --height-mm is then the fingertips' height")
     ap.add_argument("--wrist-deg", type=float, default=0.0, help="with --down: the hand turned this much about the vertical")
+    ap.add_argument("--closeup", action="store_true", help="a cell: point at its centre as the last close-up (pick.py observe) "
+                    "put it, not the overview's (to see which of the two is right)")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     cfg = config_from_args(args)
@@ -98,10 +101,20 @@ def main() -> int:
     elif t in grid["cells"]:
         xy = np.array(grid["cells"][t][:2], float)
         surface = float(grid["z_top"])
+        if args.closeup:
+            # the cell where the close-up of the last 'observe' put it (seedling/closeup.py), whatever grasp.closeup_xy says
+            obs_f = PROJECT_DIR / "experiments" / "grasp" / f"{t}_observe.json"
+            obs = json.loads(obs_f.read_text()) if obs_f.exists() else {}
+            cu = obs.get("closeup_xy") or {}
+            if not cu.get("ok") or np.hypot(*(np.array(obs.get("overview_cell", [9, 9])[:2]) - xy)) > 0.003:
+                print(f"no usable close-up for {t} with this tray fit ({cu.get('status', 'none: run pick.py --cell ' + t + ' observe first')})")
+                return 1
+            print(f"close-up centre: {cu['shift_mm']} mm from the overview's {np.round(xy, 4).tolist()}")
+            xy = np.array(cu["xy"], float)
         cells = np.array([v[:2] for v in grid["cells"].values()], float)
         ctr = cells.mean(0)
         yaw = float(np.arctan2(ctr[1], ctr[0]) + np.radians(15.0))  # the program's approach direction
-        what = f"cell {t} centre {np.round(grid['cells'][t][:2], 4).tolist()}, tray top {surface:.3f}"
+        what = f"cell {t} {'close-up ' if args.closeup else ''}centre {np.round(xy, 4).tolist()}, tray top {surface:.3f}"
     else:
         print("target: H1..H6, a cell name, or back")
         return 1

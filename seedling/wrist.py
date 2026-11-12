@@ -1,6 +1,6 @@
 """Wrist-camera observation poses: where to put the arm so the camera looks at a tray cell, safely.
 
-The camera is calibrated relative to the flange (T_FC, scripts 32/33). For a target point (a cell's grasp
+The camera is calibrated relative to the flange (T_FC, scripts calib_collect.py / calib_solve.py). For a target point (a cell's grasp
 point) the camera is placed on a ray through the target: ``distance_m`` away, looking down by an
 elevation angle, from an azimuth around the base->target direction, with a roll about the optical axis.
 Candidates are tried in configuration order; the first one that is reachable from the current joints

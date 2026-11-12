@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 """Wrist-camera calibration, independent validation samples: the marker sheet seen from working-style views
 (oblique, 50-70 deg down, the wrist turned far: joint 7 in --q7-range), poses that the calibration samples do
-not contain. Samples are saved like 32_wrist_calib_collect.py, so 35_wrist_calib_eval.py tests the current
+not contain. Samples are saved like calib_collect.py, so calib_eval.py tests the current
 calibration on them without refitting.
 
 The sheet must lie where the calibration found it (T_base_marker_at_calibration of T_flange_cam.yaml).
 
-    .venvs/pipeline/bin/python scripts/36_wrist_calib_validate_collect.py --dry-run
-    .venvs/pipeline/bin/python scripts/36_wrist_calib_validate_collect.py --no-step
-    .venvs/pipeline/bin/python scripts/35_wrist_calib_eval.py calibration/sessions/wristval_<id>
+    .venvs/pipeline/bin/python scripts/calib_validate.py --dry-run
+    .venvs/pipeline/bin/python scripts/calib_validate.py --no-step
+    .venvs/pipeline/bin/python scripts/calib_eval.py calibration/sessions/wristval_<id>
 """
 from __future__ import annotations
 
@@ -145,7 +145,7 @@ def main() -> int:
         if dq[:6].max() <= 60 and dq[6] <= 180:
             robot.move_joints(q0, dynamics=args.dynamics, description="back to the start pose")
     print(f"\n{n} validation samples in {out.relative_to(PROJECT_DIR)}")
-    print(f"next: .venvs/pipeline/bin/python scripts/35_wrist_calib_eval.py {out.relative_to(PROJECT_DIR)}")
+    print(f"next: .venvs/pipeline/bin/python scripts/calib_eval.py {out.relative_to(PROJECT_DIR)}")
     return 0
 
 

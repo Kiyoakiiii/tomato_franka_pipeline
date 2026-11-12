@@ -50,10 +50,11 @@ class Frame:
     def depth(self) -> np.ndarray:
         return self.xyz[..., 2]
 
-    def save(self, path: str | Path, save_png: bool = True) -> Path:
+    def save(self, path: str | Path, save_png: bool = True, compress: bool = True) -> Path:
+        """compress=False: a working copy read again right away (1080p: ~1.3 s compressed, a fraction of that not)"""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(
+        (np.savez_compressed if compress else np.savez)(
             path.with_suffix(".npz"),
             rgb=self.rgb,
             xyz=self.xyz.astype(np.float32),
@@ -138,7 +139,7 @@ def save_in_background(jobs) -> None:
 
 
 class RemoteCamera:
-    """Frames from scripts/63_camera_server.py (the ZED kept open for a whole run)."""
+    """Frames from scripts/camera_server.py (the ZED kept open for a whole run)."""
 
     def __init__(self, sock: str, cfg: dict):
         self.sock, self.cfg = sock, cfg
@@ -193,7 +194,7 @@ class RemoteCamera:
 
 class ZedCamera:
     """Thin pyzed wrapper returning metric XYZ in the IMAGE coordinate system. With SEEDLING_CAMERA_SOCK set (a run of
-    72 with scripts/63_camera_server.py), a RemoteCamera instead: the camera stays open between pictures."""
+    run.py with scripts/camera_server.py), a RemoteCamera instead: the camera stays open between pictures."""
 
     def __new__(cls, cfg: dict, *a, **k):
         import os

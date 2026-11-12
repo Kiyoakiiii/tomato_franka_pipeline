@@ -34,7 +34,7 @@ def main() -> int:
     dyn = args.dynamics if args.dynamics is not None else 0.02
     print("start EE:", np.round(robot.T_BE()[:3, 3], 4).tolist())
     if robot.has_errors():
-        print("robot reports errors; run 20_robot_state.py --recover after checking the cause")
+        print("robot reports errors; run robot_state.py --recover after checking the cause")
         return 1
     if args.home:
         r = robot.move_joints(np.array(cfg["robot"]["home_joints_rad"]), dynamics=dyn, description="go home")

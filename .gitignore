@@ -9,6 +9,8 @@ __pycache__/
 
 # data, model weights, experiment outputs (large; not code)
 data/
+# tests/data/: the regression labels (small, hand-checked) are kept in git
+!tests/data/
 # models/ is uploaded (35 MB, the weights the pipeline loads)
 experiments/
 calibration/sessions/

@@ -123,14 +123,30 @@ class PinBrakeGripper(GripperBase):
 
         self.pb = pb
         self.s = self.g["pin_brake"]
+        # fast: (gripper.pin_brake.fast_connect) the port opened without the 3 s banner wait when the Arduino is not reset
+        # (the steps close it keeping DTR), and the open / closed state handed from step to step in a file, so that a
+        # close does not open the open gripper again first (2.8 s) and an open waits for its real travel only.
+        # 2026-11-11, from the logs: ~10-13 s of every plant's ~78 s went to these waits
+        self.fast = bool(self.s.get("fast_connect", False) and ser is None and self.s.get("port"))
         banner = True
+        how = ""
         if ser is None:
-            ser, banner = pb.connect(self.s.get("port"))
+            if self.fast:
+                ser, banner, how = quick_connect(pb, self.s["port"])
+            else:
+                ser, banner = pb.connect(self.s.get("port"))
             if ser is None:
                 raise RuntimeError("pin-brake gripper not found (USB cable / power / permission on /dev/ttyUSB*)")
         self.dev = _pin_brake_device_class()(ser, is_open=banner)
         self.dev.set_pressure(float(self.s["pressure_kpa"]))
         self.last = {}
+        if self.fast and not banner:
+            st = load_state()
+            if st is not None:
+                restore_state(self.dev, st)
+                how += f"; state from the last step: {'open' if st['is_open'] else 'closed'}"
+        if how:
+            print(f"Gripper connected ({how})")
 
     def pressure_kpa(self) -> float | None:
         """Latest pad pressure (streamed while closed), None if no sample yet."""
@@ -140,6 +156,8 @@ class PinBrakeGripper(GripperBase):
     def open(self, width_m=None):
         self._confirm("pin-brake gripper open (deflate, pneumatics off, servo to 0)")
         self.dev.open()
+        if self.fast:
+            save_state(True, 0, self.dev.open_done_time)
         self.pb.sleep_until(self.dev.open_done_time)  # G0 returns at once; wait until the pins are clear
         return True
 
@@ -150,6 +168,8 @@ class PinBrakeGripper(GripperBase):
         if not self.dev.is_open:
             self.dev.open()
         self.last = r = self.dev.close_and_report(w)
+        if self.fast:
+            save_state(False, int(self.dev.last_close_angle), 0.0)
         r["pressure_kpa_after"] = self.pressure_kpa()
         if r["stop"] == "pressure":
             return GraspResult(True, None, None, f"stopped at pressure after {r['t_stop_s']:.2f} s (object not detectable)")
@@ -161,6 +181,96 @@ class PinBrakeGripper(GripperBase):
 
     def close(self):
         self.dev.shutdown()
+
+    def detach(self, settle_s: float = 0.2) -> None:
+        """stop reading and close the port keeping DTR as it is (HUPCL off): the Arduino is not reset, so the gripper stays
+        as it is (closed on a plant, or open) for the next step's connection (Linux: termios)"""
+        import termios
+
+        ser = self.dev.ser
+        self.dev.running = False
+        if settle_s > 0:
+            time.sleep(settle_s)
+        attrs = termios.tcgetattr(ser.fd)
+        attrs[2] &= ~termios.HUPCL
+        termios.tcsetattr(ser.fd, termios.TCSANOW, attrs)
+        ser.close()
+
+
+STATE_MAX_AGE_S = 7200.0
+
+
+def _state_path():
+    from .config import PROJECT_DIR
+
+    return PROJECT_DIR / ".tmp" / "pin_brake_state.json"
+
+
+def save_state(is_open: bool, last_close_angle: int, open_done_monotonic: float, path=None) -> None:
+    """the gripper as the last step left it: open (and when its pins are clear, wall time) or closed (at which angle)"""
+    import json
+
+    p = path or _state_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    done_wall = time.time() + max(0.0, open_done_monotonic - time.monotonic()) if is_open else 0.0
+    p.write_text(json.dumps({"is_open": bool(is_open), "last_close_angle": int(last_close_angle), "open_done_wall": done_wall,
+                             "t": time.time()}))
+
+
+def load_state(path=None, max_age_s: float = STATE_MAX_AGE_S) -> dict | None:
+    """the saved state, if recent and readable (else None: the gripper treated as the driver does by itself)"""
+    import json
+
+    p = path or _state_path()
+    try:
+        st = json.loads(p.read_text())
+        if time.time() - float(st["t"]) > max_age_s:
+            return None
+        return {"is_open": bool(st["is_open"]), "last_close_angle": int(st["last_close_angle"]), "open_done_wall": float(st["open_done_wall"])}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def restore_state(dev, st: dict) -> None:
+    """a new connection told what the gripper is doing: open (pins at 0, clear when the last open said) or closed at an angle"""
+    dev.is_open = st["is_open"]
+    if st["is_open"]:
+        dev.last_close_angle = 0  # an open now moves nothing: 0.2 s, not 2.8
+        dev.open_done_time = time.monotonic() + max(0.0, st["open_done_wall"] - time.time())
+    else:
+        dev.last_close_angle = st["last_close_angle"]  # the open after it waits this travel only
+
+
+def quick_connect(pb, port: str, banner_s: float = 0.3, probe_s: float = 0.6):
+    """(serial, banner seen, how). The port opened; a reset Arduino prints its banner ~1.5-2 s later. Without a banner in
+    banner_s the firmware is asked for pressure frames: frames within probe_s mean it was not reset (running already),
+    else it is booting: the banner is waited for as the driver does (up to its 3 s)."""
+    t0 = time.monotonic()
+    ser = pb.open_port(port)
+    if pb.wait_for_banner(ser, timeout=banner_s):
+        return ser, True, f"banner after {time.monotonic() - t0:.1f} s: reset, open"
+    ser.write(b"s\n")
+    ser.flush()
+    got = bytearray()
+    deadline = time.monotonic() + probe_s
+    alive = False
+    while time.monotonic() < deadline:
+        got += ser.read(ser.in_waiting or 1)
+        i = got.find(bytes([pb.FRAME_START]))
+        if i >= 0 and len(got) >= i + pb.FRAME_LENGTH and got[i + pb.FRAME_LENGTH - 1] == pb.FRAME_END:
+            alive = True
+            break
+        if pb.FIRMWARE_BANNER in got:
+            return ser, True, f"banner after {time.monotonic() - t0:.1f} s: reset, open"
+    ser.write(b"q\n")
+    ser.flush()
+    if alive:
+        return ser, False, f"no reset, firmware answering after {time.monotonic() - t0:.2f} s"
+    rest = max(0.0, pb.BANNER_TIMEOUT_S - (time.monotonic() - t0))
+    banner = pb.wait_for_banner(ser, timeout=rest)
+    if not banner:
+        print(f"Warning: no firmware banner and no pressure frames from {port}; using it anyway.")
+    return ser, banner, f"waited {time.monotonic() - t0:.1f} s" + (" for the banner: reset, open" if banner else "")
 
 
 def _pin_brake_device_class():

@@ -6,7 +6,7 @@ FR3 机械臂按托盘穴位坐标侧向夹取番茄苗（连土块），放进�
 
 ```bash
 cd /home/kevin/projects/tomato_franka_pipeline
-./run_transplant.sh            # 一条命令跑完（scripts/77_program_run.py，最多 6 株）
+./run_transplant.sh            # 一条命令跑完（scripts/run.py，最多 6 株）
 ./run_transplant.sh run 1      # 同上，只做一株
 ./run_transplant.sh locate     # 只定位，看叠加图确认无误后：
 ./run_transplant.sh again 3    # 不重新定位，用上一次 locate 的结果跑 3 株
@@ -37,19 +37,27 @@ seedling/               核心代码
   calibration.py          手上相机标定（含关节偏置），load_T_FC / flange_pose
   kinematics.py           FR3 正逆运动学（含标定得到的关节偏置）
   robot.py / gripper.py   franky 机械臂封装 / pin-brake 夹爪
+  overview.py             一张总览图能得到的全部结果（托盘、有苗穴位和土面高度、圆盘和空洞）；locate.py 和离线重放共用
   traygrid.py             从一张总览图定位托盘（格子模板 + 外轮廓交叉检查）、判断有苗穴位
   disc.py                 定位红色圆盘和空洞（洞口红圈；被叶子挡住时用外圈轮廓 + 转角）
   plugsense.py            近距离测土块顶面高度
+  grasp.py                侧向夹取的共用规则：夹哪里（穴位中心/近距离）、多高（土面高度和合爪高度）、手经过时离别的苗多远、手指下方的土、观察位（pick.py 和 plan.py 共用）
+  closeup.py              近距离重新定位要夹的穴位（观察位深度里周围 5×5 格的格壁，搜索不到半格）；grasp.closeup_xy 决定只记录（log）还是按它夹（apply）
   stemline.py             颜色掩码（绿色植物 / 褐色基质）与茎线双目三角化
   wrist.py                观察位规划、机械臂各部位离地检查、手到机械臂本体的距离（自碰撞）
-  program.py              移植"程序"：每株苗用同一个夹取 / 放置模板，移到它的穴位和洞（77 用）
+  program.py              移植"程序"：每株苗用同一个夹取 / 放置模板，移到它的穴位和洞（run.py 用）
   world.py                机械臂和周围物体的碰撞模型（每段路径都用它检查）
   cartesian.py / planner.py  直线段运动 / 关节空间路径搜索
   order.py                移植顺序（最近一排、从右到左）
   transforms.py / config.py / synthetic.py（仿真场景，只给测试用）
 scripts/                入口脚本（见下表）
 tests/                  自动测试（不需要硬件）：LD_LIBRARY_PATH=.venvs/pipeline/trt_links .venvs/pipeline/bin/python -m pytest -q tests
-tools/                  环境安装脚本
+                          test_closeup.py：合成托盘（任意角度，真值已知）+ 实拍近距离图的自洽和重复性
+                          test_grasp.py：grasp.py 和合并前 pick.py / plan.py 各自的旧代码逐个对照（随机 500 多组）
+                          test_gripper_fast.py：夹爪快速连接（模拟固件，不需要硬件）
+                          test_overview_replay.py 用实拍总览图（experiments/tray/，来自 Google Drive）对照 tests/data/overview_labels.json 回归；没有照片时自动跳过
+tools/                  环境安装脚本；replay_overview.py：用今天的代码离线重放全部总览图（按拍照当天的相机位姿），输出汇总并可与在线结果或上一次重放对比；
+                          replay_closeup.py：离线重放全部近距离图的重新定位，--overlays 画出总览（红）和近距离（绿）的格线
 calibration/            T_flange_cam.yaml（相机标定）、tray_grid.json / disc.json（最近一次定位）、标定采集 sessions/
 experiments/            实验输出：tray/（每次定位的照片和叠加图）、grasp/（夹取计划、日志、近距离照片）
 .venvs/pipeline/        项目运行环境（Python 3.12，franky 2.0，pyzed，TensorRT）
@@ -61,22 +69,22 @@ experiments/            实验输出：tray/（每次定位的照片和叠加图
 
 | 用途 | 命令 | 会不会动 |
 | --- | --- | --- |
-| 环境检查 | `$P scripts/00_check_env.py [--robot]` | 不会 |
-| 机械臂状态 | `$P scripts/20_robot_state.py` | 不会 |
-| 小步移动 | `$P scripts/21_robot_jog.py --dz 10` / `--home` | 会（每次确认） |
-| 托盘和圆盘定位 | `$P scripts/60_tray_locate.py`（离线：`--frame experiments/tray/<id>/frame.npz --no-save`） | 不会 |
-| 侧向夹取一株（分步） | `$P scripts/65_side_grasp.py --cell C5 observe\|plan\|pregrasp\|approach\|lift\|lower\|retreat` | 会（plan 不会） |
-| 夹爪开合 | `$P scripts/66_gripper.py close\|open\|status` | 只动手指 |
-| 回总览位 | `$P scripts/68_goto_overview.py [--dry-run]` | 会 |
-| 一株完整流程 | `$P scripts/69_pick_cycle.py --cell C5 --place 3`（或 `--put-back` 放回原处） | 会 |
-| 放进圆盘（分步） | `$P scripts/71_place_in_disc.py plan --cell C5 --free 1,2,3` | plan 不会 |
-| 全自动移植（程序流程） | `$P scripts/77_program_run.py [--max-plants N] [--no-locate] [--reteach]`（`run_transplant.sh` 用的就是它） | 会 |
-| 建程序 / 单株夹取或放置计划 | `$P scripts/76_program.py build` / `grasp --cell C5` / `place --cell C5 --hole 3` | 不会 |
-| 托盘、圆盘放哪里更好 | `$P scripts/78_layout_check.py [--tray]` | 不会 |
-| 整轮移植模拟（随机摆放） | `$P scripts/80_sim_run.py --n 8`（`79_program_eval.py`：只评估程序） | 不会 |
-| 手指着某个洞 / 穴位检查对准 | `$P scripts/81_point_check.py H2 --down`，`back` 回总览位 | 会 |
-| 重新确定总览位 | `$P scripts/70_overview_for_area.py --dry-run`（去掉才动，并写入配置） | 会 |
-| 相机标定 | `32_wrist_calib_collect.py` 采集 → `33_wrist_calib_solve.py ... --save`；`34_wrist_calib_check.py` 快速检查；`36_wrist_calib_validate_collect.py` + `35_wrist_calib_eval.py` 独立验证 / 多次合并 | 会（每步确认） |
+| 环境检查 | `$P scripts/check_env.py [--robot]` | 不会 |
+| 机械臂状态 | `$P scripts/robot_state.py` | 不会 |
+| 小步移动 | `$P scripts/robot_jog.py --dz 10` / `--home` | 会（每次确认） |
+| 托盘和圆盘定位 | `$P scripts/locate.py`（离线：`--frame experiments/tray/<id>/frame.npz --no-save`，默认用照片旁 tray_grid.json 里当天的相机位姿；`--pose current` 改用今天的标定） | 不会 |
+| 侧向夹取一株（分步） | `$P scripts/pick.py --cell C5 observe\|plan\|pregrasp\|approach\|lift\|lower\|retreat` | 会（plan 不会） |
+| 夹爪开合 | `$P scripts/gripper.py close\|open\|status` | 只动手指 |
+| 回总览位 | `$P scripts/goto_overview.py [--dry-run]` | 会 |
+| 一株完整流程 | `$P scripts/cycle.py --cell C5 --place 3`（或 `--put-back` 放回原处） | 会 |
+| 放进圆盘（分步） | `$P scripts/place.py plan --cell C5 --free 1,2,3` | plan 不会 |
+| 全自动移植（程序流程） | `$P scripts/run.py [--max-plants N] [--no-locate] [--reteach]`（`run_transplant.sh` 用的就是它） | 会 |
+| 建程序 / 单株夹取或放置计划 | `$P scripts/plan.py build` / `grasp --cell C5` / `place --cell C5 --hole 3` | 不会 |
+| 托盘、圆盘放哪里更好 | `$P scripts/layout_check.py [--tray]` | 不会 |
+| 整轮移植模拟（随机摆放） | `$P scripts/sim_run.py --n 8`（`program_eval.py`：只评估程序） | 不会 |
+| 手指着某个洞 / 穴位检查对准 | `$P scripts/point_check.py H2 --down`，`back` 回总览位；`C9 --closeup` 指向近距离定位的穴位中心 | 会 |
+| 重新确定总览位 | `$P scripts/find_overview_pose.py --dry-run`（去掉才动，并写入配置） | 会 |
+| 相机标定 | `calib_collect.py` 采集 → `calib_solve.py ... --save`；`calib_check.py` 快速检查；`calib_validate.py` + `calib_eval.py` 独立验证 / 多次合并 | 会（每步确认） |
 
 ## 关键参数和经验
 

@@ -6,8 +6,8 @@ must be in the picture, and the far edge must still have enough pixels per cell 
 reachable, calibrated joint envelope, workspace, lowest part on the way. The arm goes there (lift in place
 first) and the pose is stored in the config (tray.overview_q).
 
-    .venvs/pipeline/bin/python scripts/70_overview_for_area.py --dry-run
-    .venvs/pipeline/bin/python scripts/70_overview_for_area.py
+    .venvs/pipeline/bin/python scripts/find_overview_pose.py --dry-run
+    .venvs/pipeline/bin/python scripts/find_overview_pose.py
 """
 from __future__ import annotations
 

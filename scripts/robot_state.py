@@ -3,7 +3,7 @@
 
 Error recovery only happens with an explicit --recover.
 
-    .venvs/pipeline/bin/python scripts/20_robot_state.py [--watch] [--recover]
+    .venvs/pipeline/bin/python scripts/robot_state.py [--watch] [--recover]
 """
 from __future__ import annotations
 

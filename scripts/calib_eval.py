@@ -6,11 +6,11 @@ the working start pose): with T_FC held fixed the marker poses are fitted on all
 sample is predicted (leave-one-out). A wrong T_FC cannot explain views from different directions with a single
 marker pose, so this held-out error is the accuracy of the calibration under the test session's conditions.
 
-    # how good is the current calibration at the working pose (session collected with 32 from the start pose)?
-    .venvs/pipeline/bin/python scripts/35_wrist_calib_eval.py calibration/sessions/wrist_<new>
+    # how good is the current calibration at the working pose (session collected with calib_collect.py from the start pose)?
+    .venvs/pipeline/bin/python scripts/calib_eval.py calibration/sessions/wrist_<new>
     # fit on all sessions together; validate by leaving each session out in turn; --save to use it
-    .venvs/pipeline/bin/python scripts/35_wrist_calib_eval.py calibration/sessions/wrist_<old> calibration/sessions/wrist_<new> --refit
-    .venvs/pipeline/bin/python scripts/35_wrist_calib_eval.py --synthetic      # self-test, no hardware
+    .venvs/pipeline/bin/python scripts/calib_eval.py calibration/sessions/wrist_<old> calibration/sessions/wrist_<new> --refit
+    .venvs/pipeline/bin/python scripts/calib_eval.py --synthetic      # self-test, no hardware
 
 Also prints, per session, the stereo disparity offset that makes the ZED dense depth agree with the marker PnP
 distances (camera.disparity_offset_px).

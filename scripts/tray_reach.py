@@ -4,13 +4,13 @@ tray; at the tray position of 2026-11-06 the rows D-F were out of reach.) Planni
 
 For the tray as last located, moved by each candidate offset (towards / away from the robot, to its left / right,
 up / down), the job in its order (nearest row first, right to left; the plants before it gone): per cell, whether
-the program grasps it (76 grasp_plan: the approach turned (as the program's variants, up to +-60 deg), the plant's own arm configurations, the
+the program grasps it (plan.py grasp_plan: the approach turned (as the program's variants, up to +-60 deg), the plant's own arm configurations, the
 hand flat or pitched down, the closing point up to 50 mm above the soil) and lifts it straight up to the carry height
 (the plug clear of the plants left). The placement is not checked (the container is not decided). The disc is
 taken out of the way.
 
-    .venvs/pipeline/bin/python scripts/83_tray_reach.py                     # the default offsets
-    .venvs/pipeline/bin/python scripts/83_tray_reach.py --radial -0.20 -0.10 0 --lateral 0 --up 0
+    .venvs/pipeline/bin/python scripts/tray_reach.py                     # the default offsets
+    .venvs/pipeline/bin/python scripts/tray_reach.py --radial -0.20 -0.10 0 --lateral 0 --up 0
 """
 from __future__ import annotations
 
@@ -35,12 +35,11 @@ def evaluate(job):
 
     from seedling.calibration import load_T_FC
     from seedling.order import plant_order
-    from seedling.program import GRASP_PITCHES, HEIGHT_SURE, PLUG, TRANSIT, Program
+    from seedling.program import GRASP_PITCHES, HEIGHT_SURE, PLUG, TRANSIT, Program, make_check_pieces
     from seedling.transforms import make_T
     from seedling.world import World
-    from seedling.wrist import path_self_clearance
 
-    m76 = importlib.import_module("76_program")
+    plan_script = importlib.import_module("plan")
     T_FC, _ = load_T_FC(cfg)
     c = np.mean([v[:2] for v in grid["cells"].values()], axis=0)
     u = c / np.linalg.norm(c)
@@ -58,7 +57,6 @@ def evaluate(job):
     dd["centre"] = (np.array(dd["centre"][:2]) + far).tolist()
     dd["holes"] = [(np.array(h[:2]) + far).tolist() for h in dd["holes"]]
     prog = Program(cfg, T_FC, g, dd)
-    min_self = float(cfg["tray"].get("observe", {}).get("min_self_clearance_m", 0.09))
     worlds = {}
 
     def world_disc(extra_taken=(), plants=None, held=None, stems=False):
@@ -69,33 +67,24 @@ def evaluate(job):
                                 overrides={**ov, **({"placed_plant_radius_mm": 10.0, "plant_clearance_mm": 5.0} if stems else {})} or None)
         return worlds[key]
 
-    def check_pieces(world, q0, wps, **kw):
-        qa = np.asarray(q0, float)
-        for qb in wps:
-            m, where = world.worst(qa, qb, **kw)
-            if m < 0:
-                return f"{where} {m * 1000:+.0f} mm"
-            if path_self_clearance(qa, np.asarray(qb, float), T_FC, cfg) < min_self:
-                return "self-collision reflex"
-            qa = qb
-        return ""
+    check_pieces = make_check_pieces(T_FC, cfg)
 
     args = SimpleNamespace()
     order = plant_order(g, allc)
     out, gone = {}, []
     for k in order:
         left = [x for x in allc if x not in gone]
-        si = dict(m76.soil_info(g, k, None, prog.tray_top), height=HEIGHT_SURE, sure=True)  # as after the close-up
+        si = dict(plan_script.soil_info(g, k, None, prog.tray_top), height=HEIGHT_SURE, sure=True)  # as after the close-up
         best, why = None, "no grasp"
-        for off in m76.variant_offsets(prog, k, [x for x in left if x != k]):
+        for off in plan_script.variant_offsets(prog, k, [x for x in left if x != k]):
             yaw = prog.yaw + np.radians(off)
             P0 = prog.cell_poses(k, si["soil"] + si["height"], yaw)
-            seeds = m76.own_solutions(prog, P0, world_disc(plants=left), cell=k, yaw=yaw)
+            seeds = plan_script.own_solutions(prog, P0, world_disc(plants=left), cell=k, yaw=yaw)
             if not seeds:
                 why = f"approach {off:+d} deg: no clear joint solution of the grasp (out of reach, or the arm into something)"
             for q_seed in seeds:
                 for pitch in (0.0,) + tuple(GRASP_PITCHES):
-                    r = m76.grasp_plan(prog, k, cfg, g, dd, None, left, world_disc, check_pieces, dict(si, pitch_deg=pitch), args,
+                    r = plan_script.grasp_plan(prog, k, cfg, g, dd, None, left, world_disc, check_pieces, dict(si, pitch_deg=pitch), args,
                                        variant={"yaw": yaw, "q": q_seed, "cap": 0.050}, stems=[x for x in left if x != k])
                     if isinstance(r, str):
                         why = r
@@ -125,7 +114,7 @@ def evaluate(job):
         if best is not None and disc_xy is not None:
             placed = False
             for hole in range(1, len(dd["holes"]) + 1):
-                pl = m76.place_plan(prog, k, hole, best[3], [x for x in left if x != k], world_disc, check_pieces)
+                pl = plan_script.place_plan(prog, k, hole, best[3], [x for x in left if x != k], world_disc, check_pieces)
                 if not isinstance(pl, str):
                     placed = True
                     break

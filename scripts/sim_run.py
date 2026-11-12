@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-"""The whole transplant run simulated, end to end, for random layouts: 77 with every script it calls (68, 76, 69, 65,
-71), the arm a stateful stand-in that checks every move against the world model (seedling.robot.StateSimRobot), the
+"""The whole transplant run simulated, end to end, for random layouts: run.py with every script it calls (goto_overview, plan, cycle, pick,
+place), the arm a stateful stand-in that checks every move against the world model (seedling.robot.StateSimRobot), the
 close-up "measuring" the soil a few mm off the overview's value, no camera and no gripper. Each layout runs in its own
 copy of the project under .tmp/simruns/ (the run rewrites the tray and disc files), so nothing of the real state is
 touched. Tells per layout how many plants went in, where plants were left and why, simulated collisions, and the
 planning time per step.
 
-    .venvs/pipeline/bin/python scripts/80_sim_run.py --n 8 --seed 3
+    .venvs/pipeline/bin/python scripts/sim_run.py --n 8 --seed 3
 """
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ def main() -> int:
     ap.add_argument("--tag", default="", help="a name for this simulation's sandboxes (.tmp/simruns_TAG; several at once)")
     ap.add_argument("--layout", type=float, nargs=5, default=None, metavar=("TRAY_R", "TRAY_L", "TRAY_Z", "DISC_X", "DISC_Y"),
                     help="one layout only: the tray moved (m, away from the robot / to its left / up) and the disc's centre at "
-                         "(x, y) in the base frame (scripts/83_tray_reach.py --disc-xy picks candidates)")
+                         "(x, y) in the base frame (scripts/tray_reach.py --disc-xy picks candidates)")
     ap.add_argument("--whole-tray", action="store_true",
                     help="every cell holds a plant; the run is repeated with an emptied disc (as if the full one were "
                          "swapped) until the tray is empty or a run places none: how much of a full tray the program empties")
@@ -131,7 +131,7 @@ def main() -> int:
         t0 = time.time()
         out, batches = "", []
         for _b in range(40 if args.whole_tray else 1):
-            r = subprocess.run([sys.executable, "-u", "scripts/77_program_run.py", "--max-plants", str(args.max_plants)], cwd=sb,
+            r = subprocess.run([sys.executable, "-u", "scripts/run.py", "--max-plants", str(args.max_plants)], cwd=sb,
                                capture_output=True, text=True, env=env)
             out += r.stdout + r.stderr
             n_b = len(re.findall(r"^\w\d+ -> H\d+ done", r.stdout, re.M))

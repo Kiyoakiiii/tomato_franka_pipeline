@@ -32,7 +32,7 @@ DEFAULTS = {
     "self_clearance_mm": 25.0,    # between the hand (gripper, camera, links 6-7) and links 0-4, link 5 and links 0-2
     # the camera housing and links 0-5: 15 mm (user, 2026-11-10; was the 25 of the rest): its box is already 35 / 30 / 27 mm
     # larger than the ZED 2i (210 x 60 x 70 for 175 x 30 x 43 mm); at 25 a full tray had 4 of its far row out of reach
-    # (camera - link5 short by 1-6 mm), at 15 all 72 (scripts/83_tray_reach.py)
+    # (camera - link5 short by 1-6 mm), at 15 all 72 (scripts/tray_reach.py)
     "camera_self_clearance_mm": 15.0,
 }
 

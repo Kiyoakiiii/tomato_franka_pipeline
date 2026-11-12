@@ -6,7 +6,7 @@ If the sheet has not moved since calibration, this is compared with the position
 With --point, the gripper is moved (gripper pointing down, every move confirmed) to --height-mm above
 the centre of --marker-id so you can see by eye whether the fingertip centre is over the marker centre.
 
-    .venvs/pipeline/bin/python scripts/34_wrist_calib_check.py --marker-mm 40 [--point --marker-id 0 --height-mm 30]
+    .venvs/pipeline/bin/python scripts/calib_check.py --marker-mm 40 [--point --marker-id 0 --height-mm 30]
 """
 from __future__ import annotations
 

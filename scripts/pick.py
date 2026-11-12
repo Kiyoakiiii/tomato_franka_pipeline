@@ -7,17 +7,17 @@ offset) a little above the plug top.
 The fingers swing forward when closing (gripper.pin_brake.close_forward_m), so the open gripper stops that far
 behind the stem. One phase per call, so that every motion is confirmed:
 
-    $P scripts/65_side_grasp.py --cell C7 observe     # look at the plug from ~0.34 m: its own soil surface height
-    $P scripts/65_side_grasp.py --cell C7 plan        # plan from the current pose, saved; no motion
-    $P scripts/65_side_grasp.py --cell C7 pregrasp    # open the gripper, go to 6 cm behind the grasp pose
-    $P scripts/65_side_grasp.py --cell C7 approach    # slide forward to the grasp pose (slow)
-    $P scripts/65_side_grasp.py --cell C7 nudge --dx-mm 4 --dy-mm -2    # fine shift (x forward, y towards higher columns)
-    $P scripts/66_gripper.py close                     # close (separate script)
-    $P scripts/65_side_grasp.py --cell C7 lift        # lift straight up (slow)
-    $P scripts/65_side_grasp.py --cell C7 check       # look at the cell again: is the soil gone (plug pulled out)?
-    $P scripts/65_side_grasp.py --cell C7 lower       # put it back down (to the grasp pose, slow)
-    $P scripts/66_gripper.py open
-    $P scripts/65_side_grasp.py --cell C7 retreat     # back to the pre-grasp
+    $P scripts/pick.py --cell C7 observe     # look at the plug from ~0.34 m: its own soil surface height
+    $P scripts/pick.py --cell C7 plan        # plan from the current pose, saved; no motion
+    $P scripts/pick.py --cell C7 pregrasp    # open the gripper, go to 6 cm behind the grasp pose
+    $P scripts/pick.py --cell C7 approach    # slide forward to the grasp pose (slow)
+    $P scripts/pick.py --cell C7 nudge --dx-mm 4 --dy-mm -2    # fine shift (x forward, y towards higher columns)
+    $P scripts/gripper.py close                     # close (separate script)
+    $P scripts/pick.py --cell C7 lift        # lift straight up (slow)
+    $P scripts/pick.py --cell C7 check       # look at the cell again: is the soil gone (plug pulled out)?
+    $P scripts/pick.py --cell C7 lower       # put it back down (to the grasp pose, slow)
+    $P scripts/gripper.py open
+    $P scripts/pick.py --cell C7 retreat     # back to the pre-grasp
 """
 from __future__ import annotations
 
@@ -79,7 +79,7 @@ def main() -> int:
                     "the stem's height, the user judged the arm clear of the tray then)")
     ap.add_argument("--wrist-clearance-off-tray-mm", type=float, default=None,
                     help="the same away from the tray (over the disc and the table): default grasp.side_wrist_clearance_off_tray_mm")
-    ap.add_argument("--wrist-reach-mm", type=float, default=0.0, help="the wrist housings reach this far sideways (see 71)")
+    ap.add_argument("--wrist-reach-mm", type=float, default=0.0, help="the wrist housings reach this far sideways (see place.py)")
     ap.add_argument("--camera-clearance-mm", type=float, default=20.0, help="camera housing above what lies under it")
     ap.add_argument("--max-line-dev-mm", type=float, default=8.0, help="the moves at the plant stay this close to their straight line")
     ap.add_argument("--disc-keepout-mm", type=float, default=0.0, help="while grasping, the arm (wrist, flange, gripper body, "
@@ -88,7 +88,7 @@ def main() -> int:
     ap.add_argument("--turn-search-s", type=float, default=3.0, help="plan: path search time for the turns that are no single joint "
                     "move (all candidates together; the hand stays high and near the straight line)")
     ap.add_argument("--from-observe", action="store_true", help="plan: from the observation pose the 'observe' phase would go to "
-                    "(not from where the arm is): what the cycle will plan from after observing (72 chooses plants this way)")
+                    "(not from where the arm is): what the cycle will plan from after observing (run.py chooses plants this way)")
     ap.add_argument("--dynamics", type=float, default=None, help="one factor for all moves (default: robot.dynamics / fine_dynamics in the config)")
     args = ap.parse_args()
     cfg = config_from_args(args)
@@ -114,7 +114,7 @@ def main() -> int:
     grid = json.loads((PROJECT_DIR / cfg["tray"]["grid_file"]).read_text())
     tray_top = float(grid["z_top"])
     disc_file = PROJECT_DIR / "calibration" / "disc.json"
-    # wrist and camera clearances are over what lies under them (tray top, disc top or table), as in 71
+    # wrist and camera clearances are over what lies under them (tray top, disc top or table), as in place.py
     out = PROJECT_DIR / "experiments" / "grasp"
     out.mkdir(parents=True, exist_ok=True)
     plan_file = out / f"{args.cell}_side_plan.json"
@@ -173,19 +173,10 @@ def main() -> int:
 
     def observe_pose(q_from):
         """the observation pose for this cell (camera ~0.34 m away, looking down) reached from q_from"""
-        import copy
+        from seedling.grasp import observe_pose as _op
 
-        from seedling.wrist import plan_observation
-
-        c = np.array(grid["cells"][args.cell], float)
-        guess = (grid.get("soil_z_overview") or {}).get(args.cell) or tray_top + args.plug_dz_mm / 1000
-        c2 = copy.deepcopy(cfg)
-        o = c2["tray"]["observe"]
-        # all elevations compared: the least joint change wins (a 65 deg view can need a 70 deg wrist turn where an
-        # 80 deg view needs 45); 2 deg of joint change per place down the list keeps 65 on a near tie
-        o.update(distance_m=args.observe_distance, elevation_deg=[65, 55, 70, 75, 80], azimuth_offsets_deg=[0, -20, 20, -40, 40],
-                 min_clearance_m=0.15, all_elevations=True, elevation_penalty_deg=2.0)
-        return plan_observation(np.array([c[0], c[1], guess]), q_from, T_FC, guess + 0.15, c2)
+        return _op(cfg, grid, args.cell, T_FC, tray_top, q_from, elevations=(65, 55, 70, 75, 80),
+                   distance=args.observe_distance, plug_dz=args.plug_dz_mm / 1000)
 
     def look(tag):
         """Observation pose for this cell (camera ~0.34 m away, looking down), picture, soil surface of the cell."""
@@ -197,14 +188,14 @@ def main() -> int:
 
         c = np.array(grid["cells"][args.cell], float)
         pl = None
-        # the observation pose is always worked out as from the overview pose (as when the plant was chosen: 72, 65 plan
-        # --from-observe), whatever the arm comes from (72 goes from one plant's hole straight to the next plant,
+        # the observation pose is always worked out as from the overview pose (as when the plant was chosen: run.py, pick.py plan
+        # --from-observe), whatever the arm comes from (run.py goes from one plant's hole straight to the next plant,
         # 2026-11-05); the way there from where the arm is is planned below
         q_ref = np.array(cfg["tray"]["overview_q"], float)
         if plan_file.exists():
             try:
                 old_ = json.loads(plan_file.read_text())
-                # (the program, 76, picks it near the cell's stage: any observation pose made for this cell is used)
+                # (the program, plan.py, picks it near the cell's stage: any observation pose made for this cell is used)
                 if ("observe_q" in old_ and (old_.get("program") or float(np.degrees(np.abs(np.array(old_["observe_from"]) - q_ref)).max()) < 0.5)
                         and np.linalg.norm(np.array(old_["observe_cell_xyz"]) - np.array(grid["cells"][args.cell], float)) < 0.003):
                     from seedling.wrist import ObservationPlan, path_clearance
@@ -223,7 +214,7 @@ def main() -> int:
         print(f"{tag}: observation pose {pl.desc}, max joint change {pl.max_joint_step_deg:.0f} deg, lowest {pl.lowest_part} z={pl.lowest_z:.3f}")
         # from where the arm is (the overview, or just after letting go the last plant in the disc) to the observation
         # pose: the straight joint move when it is clear of everything (seedling.world: the plants in the tray and in
-        # the disc too), else straight up first and a path (seedling.planner.lift_then_plan, as 68 does)
+        # the disc too), else straight up first and a path (seedling.planner.lift_then_plan, as goto_overview.py does)
         from seedling.planner import lift_then_plan
         from seedling.world import World
 
@@ -267,12 +258,25 @@ def main() -> int:
             cam.close()
         T_BC = flange_pose(robot) @ T_FC
         f.meta["q"] = robot.q().tolist()
-        f.save(out / f"{args.cell}_{tag}", save_png=False)
+        f.save(out / f"{args.cell}_{tag}", save_png=False, compress=False)  # read again by plan / plan.py at once; the archive copy below is compressed
         # every close-up kept (the file above is overwritten per cell): training data for a stem fine-tune model
         (out / "closeups").mkdir(exist_ok=True)
         from seedling.camera import save_in_background
 
         save_in_background([(f, out / "closeups" / f"{args.cell}_{tag}_{time.strftime('%Y%m%d_%H%M%S')}", False)])
+        # the cell again from the close-up (the walls of the cells around it, seedling/closeup.py): recorded always,
+        # grasped at only with grasp.closeup_xy: apply (then the plug is measured around that centre too)
+        from seedling.closeup import grasp_xy, refine_cell
+
+        try:
+            cu = refine_cell(f, T_BC, grid["cells"], args.cell, cfg)
+        except Exception as e:  # noqa: BLE001  (a record, never a reason to stop)
+            cu = {"ok": False, "status": f"error: {e!r}", "shift_mm": [0.0, 0.0]}
+        print(f"{tag}: close-up re-location: {cu['status']}; shift {cu.get('shift_mm')} mm"
+              + (f", tray top {cu['z_top']:.3f} (overview {cu['z_overview']:.3f})" if cu.get("z_top") else ""))
+        xy_, why_ = grasp_xy({"closeup_xy": cu}, cfg)
+        if xy_ is not None:
+            c = np.array([xy_[0], xy_[1], c[2]])
         m = measure_plug(f, T_BC, c[:2], cfg)
         print(f"{tag}: soil " + (f"z {m['soil_z']:.3f} ({(m['soil_z'] - tray_top) * 1000:+.0f} mm vs the tray top), {m['n']} points" if m["ok"] else m["status"]))
         # where the stem leaves the soil: green points just above the soil near the cell centre (the plug sits at
@@ -304,7 +308,8 @@ def main() -> int:
             if sel.sum() >= 50:
                 cover = round(float(gc_[sel].mean()), 2)
                 print(f"{tag}: leaves cover {cover * 100:.0f}% of the plug top")
-        return {"q": robot.q().tolist(), "measure": m, "stem": stem, "leaf_cover": cover, "overview": (grid.get("soil_z_overview") or {}).get(args.cell)}
+        return {"q": robot.q().tolist(), "measure": m, "stem": stem, "leaf_cover": cover, "overview": (grid.get("soil_z_overview") or {}).get(args.cell),
+                "closeup_xy": cu, "T_BC": T_BC.tolist(), "overview_cell": [float(v) for v in grid["cells"][args.cell]]}
 
     if args.phase == "observe":
         rec = look("observe")
@@ -347,41 +352,21 @@ def main() -> int:
                         "observe_cell_xyz": [float(v) for v in grid["cells"][args.cell]]}
             q_now = pl.q
         off = args.offset_mm if args.offset_mm is not None else cfg["grasp"].get("side_offset_mm", [0.0, 0.0])
-        c = np.array(grid["cells"][args.cell], float)
-        # soil surface of THIS plug: close measurement, overview measurement, fallback tray top + plug_dz
-        z_ov = (grid.get("soil_z_overview") or {}).get(args.cell)
+        # where and how high: the shared rules (seedling/grasp.py, as the program's plan.py)
+        from seedling.grasp import grasp_cell, soil_info
+
         obs = json.loads(obs_file.read_text()) if obs_file.exists() else None
-        z_near = obs["measure"]["soil_z"] if obs and obs["measure"].get("ok") else None
-        off_c = obs and np.hypot(*obs["measure"].get("shift_mm", [0, 0])) > 12.0
-        if z_near is not None and z_ov is not None and off_c and z_near > z_ov + 0.003:
-            # the close soil patch lies off the cell centre (the plug's rim or a neighbour seen, D6 2026-10-28: +27 mm
-            # vs the tray top, 15 mm off centre, grasped above the stem): the overview value, at the close-up height
-            soil_z, src = z_ov, f"overview {z_ov:.3f}: the close {z_near:.3f} came from soil {np.hypot(*obs['measure']['shift_mm']):.0f} mm off the cell centre"
-        elif z_near is not None and z_ov is not None and abs(z_near - z_ov) > args.disagree_mm / 1000:
-            soil_z, src = max(z_near, z_ov), f"overview {z_ov:.3f} and close {z_near:.3f} disagree: the higher"
-        elif z_near is not None:
-            soil_z, src = z_near, "close measurement" + (f" (overview {z_ov:.3f})" if z_ov is not None else "")
-        elif z_ov is not None:
-            # the overview sees the plug from far and at an angle, often half under leaves: it tends to read low
-            # (C4, 2026-10-26: grasped too low). Never below the usual plug height then
-            fb = tray_top + args.plug_dz_mm / 1000
-            soil_z, src = (z_ov, "overview measurement (no close one)") if z_ov >= fb else \
-                (fb, f"overview {z_ov:.3f} (no close one) below the usual plug height: tray top + plug_dz")
-        else:
-            soil_z, src = tray_top + args.plug_dz_mm / 1000.0, "NOT MEASURED: tray top + plug_dz"
-        print(f"soil surface of {args.cell}: z {soil_z:.3f} ({(soil_z - tray_top) * 1000:+.0f} mm vs the tray top) from {src}")
+        c = grasp_cell(grid, args.cell, obs, cfg)
+        si = soil_info(grid, args.cell, obs, tray_top, disagree=args.disagree_mm / 1000, plug_dz=args.plug_dz_mm / 1000,
+                       leafy_cover=args.leafy_cover, heights=(args.height_close_mm / 1000, args.height_mm / 1000, args.height_leafy_mm / 1000))
+        soil_z, sure = si["soil"], si["sure"]
+        print(f"soil surface of {args.cell}: z {soil_z:.3f} ({(soil_z - tray_top) * 1000:+.0f} mm vs the tray top) from {si['src']}")
         if obs is not None:
             obs["soil_used"] = soil_z
             obs_file.write_text(json.dumps(obs, indent=1))
-        # closing height: 17 mm above a soil surface measured close up (sure), 35 mm when it is only estimated
-        # (the close one also when it disagrees with the overview and is the higher: C5 2026-10-28 got 35 mm that way)
-        sure = z_near is not None and (soil_z == z_near or src.startswith(f"overview {z_ov:.3f}: the close"))
-        height = args.height_close_mm if sure else args.height_mm
-        cov = (obs or {}).get("leaf_cover")
-        if sure and cov is not None and cov > args.leafy_cover:
-            # leaves over the plug: the fingers' bottom at the soil, so they pinch the stem where it leaves the soil
-            height = min(height, args.height_leafy_mm)
-            print(f"leaves cover {cov * 100:.0f}% of the plug top: closing {height:.1f} mm above the soil (finger bottom at it)")
+        height = si["height"] * 1000
+        if si["leafy"]:
+            print(f"leaves cover {si['leaf_cover'] * 100:.0f}% of the plug top: closing {height:.1f} mm above the soil (finger bottom at it)")
         # the highest closing point this plant may get: the estimated height (what the plan made when the plant was chosen,
         # before the close-up, was checked at); raised up to it only when the gripper is too close to the tray there
         z_cap = soil_z + max(args.height_mm, height) / 1000.0
@@ -416,22 +401,10 @@ def main() -> int:
         radial = np.arctan2(c[1], c[0])
 
         def hand_clearance(yaw):
-            """how far the other plants' stems (cell centres) stay from what the open hand sweeps on its way in, in the
-            plane of the grasp: the open fingers (a finger outside each side of the 44 mm gap: 31 mm either side) from
-            15 mm past the stem to 75 mm behind it, the gripper body (45 mm either side) behind that, the pre-grasp
-            standoff added. 2026-11-05: headings were tried straightest first whichever side the neighbours were on, and
-            C9 (the right end of its row, its neighbour C8 on the left) was approached from the left past C8"""
-            back = -np.array([np.cos(yaw), np.sin(yaw)])
-            lat_ax = np.array([-back[1], back[0]])
-            so = args.standoff_mm / 1000.0
-            boxes = [(-0.015, 0.075, 0.031), (0.075, 0.18 + so, 0.045)]  # (from, to behind the stem, half width)
-            best = np.inf
-            for o in occupied:
-                d = o - c[:2]
-                s_, l_ = float(d @ back), abs(float(d @ lat_ax))
-                for s0, s1, hw in boxes:
-                    best = min(best, float(np.hypot(max(0.0, s0 - s_, s_ - s1), max(0.0, l_ - hw))))
-            return best
+            """how far the other plants' stems stay from what the open hand sweeps on its way in (seedling.grasp)"""
+            from seedling.grasp import hand_clearance as _hc
+
+            return _hc(c, occupied, yaw, args.standoff_mm / 1000.0)
 
         def blocked(yaw, pitch_deg):
             reach = 0.14 if pitch_deg >= 26 else min(0.30, 0.14 * np.tan(np.radians(26)) / max(np.tan(np.radians(pitch_deg)), 1e-6))
@@ -452,35 +425,16 @@ def main() -> int:
         # the close-up, the soil under each finger track (from 45 mm behind the closing point to 15 mm past it; taken as
         # flat: a neighbour 15-45 mm behind and 8-9 mm higher was hit, so the pitch gives no credit there): the finger
         # bottom must clear it by --finger-clearance-mm, so the closing point is raised as far as that needs (per heading)
-        soilP = None
-        npz = out / f"{args.cell}_observe.npz"
-        if sure and npz.exists():
-            from seedling.camera import Frame
-            from seedling.plugsense import substrate_mask
-            from seedling.stemline import _mask
-            from seedling.transforms import apply_T
+        from seedling.grasp import finger_floor as _ff, soil_points
 
-            fr = Frame.load(npz)
-            okp = np.isfinite(fr.xyz).all(-1)
-            okp &= substrate_mask(fr.rgb, cfg["stemline"]) & ~_mask(fr.rgb, cfg["stemline"])
-            soilP = apply_T(kinematics.fk_flange(np.array(obs["q"])) @ T_FC, fr.xyz[okp])
+        soilP = soil_points(out / f"{args.cell}_observe.npz", obs["q"], T_FC, cfg) if sure and obs is not None else None
 
         def finger_floor(yaw):
             """lowest closing-point height whose finger bottom clears the soil under both finger tracks (None: no data)"""
-            if soilP is None:
-                return None
-            ah = np.array([np.cos(yaw), np.sin(yaw)])
-            d = soilP[:, :2] - c[:2]
-            s_ = d @ ah  # ahead of the closing point (+) / behind it, towards the robot (-)
-            lat = np.abs(d @ np.array([-ah[1], ah[0]]))
-            m = (lat > 0.012) & (lat < 0.034) & (s_ > -0.045) & (s_ < 0.015)
-            if m.sum() < 30:
-                return None
-            need = soilP[m, 2] + args.finger_clearance_mm / 1000 + 0.0145
-            return float(np.percentile(need, 98))
+            return _ff(soilP, c, yaw, args.finger_clearance_mm / 1000)
 
         accept_first, d0_ = [False], [0.0]
-        # grasp poses from which the plant could not be placed (69 writes them when the placement plan fails, and plans
+        # grasp poses from which the plant could not be placed (cycle.py writes them when the placement plan fails, and plans
         # again): their joint solutions are not used again in this cycle (the hand is kept flat while carrying, so the
         # arm cannot change its joint configuration on the way: the grasp's decides; 2026-11-05 C8)
         npf = out / f"{args.cell}_no_place.json"
@@ -491,7 +445,7 @@ def main() -> int:
 
         if avoid:
             print(f"{len(avoid)} grasp pose(s) from which the plant could not be placed: not used again")
-        # the plan made when this plant was chosen (72: from the predicted observation pose) is used as it is when the
+        # the plan made when this plant was chosen (run.py: from the predicted observation pose) is used as it is when the
         # arm is at that pose now and its closing point still comes out the same (within 3 mm, with the close-up's
         # soil and the neighbours' soil under the finger tracks) (2026-11-04: planning twice per plant cost ~15 s)
         if plan_file.exists() and not args.from_observe:
@@ -515,20 +469,20 @@ def main() -> int:
 
         # can the plant be carried from this grasp to a free hole with the hand kept flat? The hand only turning about
         # the vertical, the arm cannot change its joint configuration on the way: the grasp's decides (2026-11-05: C8's
-        # chosen grasps could not be placed, found only after ~20 s of placement planning each). The way of 71
+        # chosen grasps could not be placed, found only after ~20 s of placement planning each). The way of place.py
         # (straight up to the carry height, then straight moves to above the hole), joint continuity only, no
-        # obstacles: a quick filter, 71 decides
+        # obstacles: a quick filter, place.py decides
         holes_ = np.array(disc_now["holes"]) if disc_now is not None and "holes" in disc_now else None
         free_ = [h for h in disc_now.get("free_holes", [])] if holes_ is not None else []
 
         good_ = []  # (hole, heading, route) that worked for an earlier candidate: tried first
 
         def placeable(q_li, z_c):
-            """the way 71 carries it (straight up, straight moves of a flat hand to above a free hole, straight down
+            """the way place.py carries it (straight up, straight moves of a flat hand to above a free hole, straight down
             until the plug bottom is at the disc top) has a continuous joint solution and the release pose is clear"""
             if holes_ is None or not free_:
                 return True
-            below = (z_c - soil_z) + 0.040  # plug bottom below the held stem (71: closing height above the soil + plug)
+            below = (z_c - soil_z) + 0.040  # plug bottom below the held stem (place.py: closing height above the soil + plug)
             z_rel = float(disc_now["z_top"]) + below
             T_li = G_of(q_li)
             z_hi = max(float(T_li[2, 3]), tray_top + 0.15 + 0.075)
@@ -539,7 +493,7 @@ def main() -> int:
                 return False
             q_u = pcs_[-1][1][-1]
             combos = [(h_, dy, ri) for h_ in sorted(free_, key=lambda h_: -np.hypot(*holes_[h_ - 1][:2]))
-                      for dy in [0.0] + [s_ * d_ for d_ in (20, 40, 60, 80, 10, 30, 50, 70, 90) for s_ in (-1, 1)]  # as 71
+                      for dy in [0.0] + [s_ * d_ for d_ in (20, 40, 60, 80, 10, 30, 50, 70, 90) for s_ in (-1, 1)]  # as place.py
                       for ri in range(3)]
             combos.sort(key=lambda t_: t_ not in good_)
             for h_, dy, ri in combos:
@@ -792,7 +746,7 @@ def main() -> int:
                                          **{f"{k_}_vias": [v.tolist() for v in q_down[k_]] for k_ in ("down", "approach", "lift")},
                                          "z_close": round(float(z_close), 4), "tray_top": round(tray_top, 4),
                                          "yaw": float(radial + np.radians(dyaw)), **(obs_from or {}),
-                                         "cell_xy": [float(v) for v in grid["cells"][args.cell][:2]],
+                                         "cell_xy": [float(v) for v in c[:2]],  # where it grasps (close-up / stem shift included)
                                          "safe": bool(ok)}, indent=1))
         print("plan saved" if ok else "plan saved but NOT SAFE: the motion phases will refuse it", plan_file.relative_to(PROJECT_DIR))
         return 0 if ok else 1
@@ -815,20 +769,14 @@ def main() -> int:
     if args.phase == "pregrasp":
         if not at("start", 2.0):
             return 1
-        from seedling.gripper import make_gripper
-        import termios
-
         import os
+
+        from seedling.gripper import make_gripper
 
         if not os.environ.get("SEEDLING_SIM_STATE"):  # (the whole-run simulation has no gripper)
             g = make_gripper(cfg, sim=False, step_mode=False)
             g.open()
-            ser = g.dev.ser
-            g.dev.running = False
-            attrs = termios.tcgetattr(ser.fd)
-            attrs[2] &= ~termios.HUPCL
-            termios.tcsetattr(ser.fd, termios.TCSANOW, attrs)
-            ser.close()
+            g.detach(settle_s=0.0)  # (no wait here, as before)
         for i_, qv in enumerate(plan.get("vias", [])):  # the turn, through the via poses of the path search
             if not move(np.array(qv), args.dynamics, f"turn (via pose {i_ + 1}/{len(plan['vias'])})"):
                 return 1
