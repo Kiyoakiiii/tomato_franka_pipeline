@@ -540,6 +540,13 @@
     }
    }
   },
+  "20261104_173417": {
+   "tray": {
+    "expect": "fail",
+    "why": "tray raised on the stand, its far rows out of the picture (checked on the overlay 2026-11-12: the grid fit sits a row off, the outline fallback 2 rows off)",
+    "fixed": "2026-11-12: the outline's corners checked against the picture border at the tray top, not at the support"
+   }
+  },
   "20261104_181034": {
    "tray": {
     "expect": "ok",

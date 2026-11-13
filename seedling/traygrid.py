@@ -538,10 +538,16 @@ def locate_tray_outline(frame: Frame, T_BC: np.ndarray, rows: int, cols: int, cf
         if not (-0.01 <= dl <= 0.045 and -0.01 <= dw <= 0.045):
             okk, status = False, (f"outline {L * 1000:.0f} x {Wd * 1000:.0f} mm does not fit a {rows} x {cols} tray at "
                                   f"{pitch * 1000:.1f} mm ({cols * pitch * 1000:.0f} x {rows * pitch * 1000:.0f} mm + rims): not the tray alone")
-    # the whole outline must be inside the picture (a cut tray gives a too small or shifted rectangle)
+    # the whole outline must be inside the picture (a cut tray gives a too small or shifted rectangle). The outline alone
+    # (the fallback, no top_z): its corners checked at the tray top, where its points are; at the support (+2 cm), a tray
+    # raised 25 cm with its far rows out of the picture had its corners 200 px inside it and passed, the cells 2 rows off
+    # (20261104_173417, found by the overview replay 2026-11-12). The cross-check (top_z given) keeps the support height:
+    # there the outline only decides whole cells, and at the tray top a tray at the picture edge (20261026_180040) lost
+    # its correction by a row
     T_CB = inv_T(T_BC)
     H_, W_ = frame.rgb.shape[:2]
-    uv = np.array([frame.intr.project(apply_T(T_CB, np.array([cx_, cy_, support + min_step_m]))) for cx_, cy_ in corners])
+    z_b = rim_z if top_z is None else support + min_step_m
+    uv = np.array([frame.intr.project(apply_T(T_CB, np.array([cx_, cy_, z_b]))) for cx_, cy_ in corners])
     if okk and ((uv[:, 0] < 15).any() or (uv[:, 1] < 15).any() or (uv[:, 0] > W_ - 15).any() or (uv[:, 1] > H_ - 15).any()):
         okk, status = False, "tray outline touches the picture border: not fully in view"
     return {"ok": okk, "status": status, "cells": cells, "corners": corners.tolist(), "size_m": [round(L, 4), round(Wd, 4)],
