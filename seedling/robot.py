@@ -212,6 +212,8 @@ class StateSimRobot(RobotBase):
         from .world import World
 
         q = np.asarray(q, float).reshape(7)
+        if not np.all(np.isfinite(q)) or np.any(q < kinematics.Q_MIN) or np.any(q > kinematics.Q_MAX):
+            raise UnsafeTarget("joint target outside the joint limits (FR3, narrowed by robot.side_tool.joint7_range_deg)")
         st = self._load()
         qa = np.array(st["q"], float)
         if os.environ.get("SEEDLING_SIM_REALTIME"):  # the move takes as long as it would on the arm
@@ -375,7 +377,7 @@ class FrankyRobot(RobotBase):
     def move_joints(self, q, dynamics=None, description="joint move") -> MotionResult:
         q = np.asarray(q, dtype=float).reshape(7)
         if not np.all(np.isfinite(q)) or np.any(q < kinematics.Q_MIN) or np.any(q > kinematics.Q_MAX):
-            raise UnsafeTarget("joint target outside FR3 limits")
+            raise UnsafeTarget("joint target outside the joint limits (FR3, narrowed by robot.side_tool.joint7_range_deg)")
         self._validate(kinematics.fk(q, self.F_T_EE), check_ik=False)
         self.confirm(f"{description}: q -> {np.round(q, 3).tolist()}")
         d = self._dyn(dynamics)
@@ -443,6 +445,8 @@ class SimRobot(RobotBase):
 
     def move_joints(self, q, dynamics=None, description="joint move") -> MotionResult:
         q = np.asarray(q, dtype=float).reshape(7)
+        if not np.all(np.isfinite(q)) or np.any(q < kinematics.Q_MIN) or np.any(q > kinematics.Q_MAX):
+            raise UnsafeTarget("joint target outside the joint limits (FR3, narrowed by robot.side_tool.joint7_range_deg)")
         T = kinematics.fk(q, self.F_T_EE)
         self._validate(T, check_ik=False)
         self.confirm(f"{description}: q -> {np.round(q, 3).tolist()}")

@@ -28,6 +28,19 @@ FLANGE_D = 0.107
 # FR3 joint limits (rad) from the Franka FR3 datasheet.
 Q_MIN = np.array([-2.7437, -1.7837, -2.9007, -3.0421, -2.8065, 0.5445, -3.0159])
 Q_MAX = np.array([2.7437, 1.7837, 2.9007, -0.1518, 2.8065, 4.5169, 3.0159])
+Q_MIN_FR3, Q_MAX_FR3 = Q_MIN.copy(), Q_MAX.copy()
+
+
+def apply_tool_limits(cfg: dict) -> None:
+    """Narrow the joint ranges in place (every IK, plan and joint move's check reads Q_MIN / Q_MAX) for the tool on the
+    flange: robot.side_tool.joint7_range_deg (2026-11-16: the camera on the side tool's post runs into the wrist (link 6)
+    with joint 7 above -14 deg, measured by hand; past it only by going through the wrist). Without it the FR3 ranges."""
+    Q_MIN[:] = Q_MIN_FR3
+    Q_MAX[:] = Q_MAX_FR3
+    r7 = ((cfg.get("robot") or {}).get("side_tool") or {}).get("joint7_range_deg")
+    if r7:
+        Q_MIN[6] = max(Q_MIN_FR3[6], math.radians(float(r7[0])))
+        Q_MAX[6] = min(Q_MAX_FR3[6], math.radians(float(r7[1])))
 Q_READY = np.array([0.0, -np.pi / 4, 0.0, -3 * np.pi / 4, 0.0, np.pi / 2, np.pi / 4])
 
 # Correction added to the REPORTED joint angles to get the ones this model needs (true geometry). Found by the

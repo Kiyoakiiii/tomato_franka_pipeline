@@ -85,7 +85,18 @@ def main() -> int:
 
     def record(tag: str) -> bool:
         time.sleep(args.settle_s)
-        f = cam.grab(n_average=3)
+        try:
+            f = cam.grab(n_average=3)
+        except TimeoutError:
+            # 2026-11-16 (camera on the side tool, its cable moving more): one grab timed out mid-collection and the
+            # whole run stopped; the camera worked again right after
+            print(f"  {tag}: camera grab timed out; again in 1 s")
+            time.sleep(1.0)
+            try:
+                f = cam.grab(n_average=3)
+            except TimeoutError:
+                print(f"  {tag}: camera grab timed out again (skipped; check the camera cable)")
+                return False
         obs = detect_markers(f, L, args.dict, args.ids)
         T_BE = robot.T_BE()
         img = cv2.cvtColor(f.rgb, cv2.COLOR_RGB2BGR)

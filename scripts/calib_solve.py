@@ -24,6 +24,8 @@ from scipy.spatial.transform import Rotation
 
 from _common import base_parser, config_from_args
 
+from seedling.config import PROJECT_DIR
+
 
 def main() -> int:
     ap = base_parser(__doc__)
@@ -34,6 +36,9 @@ def main() -> int:
     ap.add_argument("--synthetic", action="store_true")
     ap.add_argument("--ids", type=int, nargs="*", default=None, help="only these marker ids (ignore stray detections)")
     ap.add_argument("--marker-mm", type=float, default=None, help="override the marker side used at collection (e.g. measured later)")
+    ap.add_argument("--joint-offsets-from", default=None, metavar="YAML",
+                    help="the flange poses from the joints with these joint offsets (a calibration file's joint_offsets_rad), "
+                         "as every plan uses them, instead of the robot's nominal pose; saved with the result")
     args = ap.parse_args()
     cfg = config_from_args(args)
 
@@ -47,6 +52,18 @@ def main() -> int:
     else:
         samples = load_samples(args.session)
     L = args.marker_mm / 1000.0 if args.marker_mm else float(samples[0]["marker_length_m"])
+    # 2026-11-16 (the camera on the side tool, 14 cm from the flange axis, the arm reaching 1 m): with the nominal poses
+    # the fit was 6.3 px rms (held out: 7 mm at the marker); with the joint offsets every plan uses, 1.2 px
+    from seedling import kinematics
+
+    offsets = None
+    if args.joint_offsets_from:
+        import yaml
+
+        offsets = yaml.safe_load((PROJECT_DIR / args.joint_offsets_from).read_text())["joint_offsets_rad"]
+        kinematics.set_joint_offsets(offsets)
+        print(f"flange poses from the joints with the joint offsets of {args.joint_offsets_from}: "
+              f"{np.round(np.degrees(offsets), 2).tolist()} deg")
     BF, OBS, KS, n_drop = [], [], [], 0
     for s in samples:
         obs = {}
@@ -57,7 +74,7 @@ def main() -> int:
                 obs[int(k)] = np.array(v["corners_px"])
             else:
                 n_drop += 1
-        BF.append(np.array(s["T_BF"]))
+        BF.append(np.array(s["T_BF"]) if offsets is None else kinematics.fk_flange(np.array(s["q"])))
         OBS.append(obs)
         KS.append(np.array(s["K"]))
     if n_drop:
@@ -114,6 +131,9 @@ def main() -> int:
                 "heldout_validation": val, "marker_length_m": L,
                 "T_base_marker_at_calibration": {str(k): T.tolist() for k, T in T_BM.items()},
                 "flange_to_ee_used": json.loads((Path(args.session) / "collect_args.json").read_text()).get("flange_to_ee")}
+        if offsets is not None:
+            meta["joint_offsets_rad"] = list(map(float, offsets))
+            meta["calibration_id"] += f"+joint_offsets_of_{args.joint_offsets_from}"
         path = save_T_FC(cfg["camera"]["T_flange_cam_file"], T_FC, meta)
         (Path(args.session) / "solution.json").write_text(json.dumps({**meta, "T_flange_cam": T_FC.tolist()}, indent=1))
         print("saved", path)

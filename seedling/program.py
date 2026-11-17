@@ -197,6 +197,20 @@ class Program:
             pcs, _w = self.chain(q_up, r_, max_dev_m=0.03, max_tilt=MAX_TILT)
             if pcs is not None:
                 return pcs[-1][1][-1], [w for p_ in pcs for w in p_[2]]
+        # one joint move to above the hole, the hand within MAX_TILT of flat all along (the arm turned about its base:
+        # the flange stays upright). The side tool (2026-11-16) holds the plant 259 mm from the flange's axis: turning it
+        # on a straight line makes the wrist orbit it, and every such carry found no continuous joint solution (a full
+        # tray: 53 of 72 let go into the disc)
+        if self.cfg["robot"].get("side_tool"):
+            T_E = T_ac @ inv_T(self.G)
+            near = kinematics.solve_ik_near(T_E, q_up, self.F, self.margin)
+            cands = [near] if near is not None else []
+            cands += sorted(kinematics.ik_all(T_E, self.F, seeds=[q_up], limit_margin_rad=self.margin),
+                            key=lambda q_: float(np.abs(q_ - q_up).max()))[:6]
+            for q_ac in cands:
+                if np.linalg.norm(self.G_of(q_ac)[:3, 3] - p_ac) <= 0.0015 and \
+                        cartesian.max_tilt_between(q_up, q_ac, self.F, self.G) <= MAX_TILT:
+                    return q_ac, [q_ac]
         return None, None
 
     # ---- teaching ----------------------------------------------------------------------------------------------------

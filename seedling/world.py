@@ -4,7 +4,8 @@
   collision mesh of each link as its convex hull (coal), placed by pinocchio (the same kinematics as
   seedling.kinematics, joint offsets included: checked to 1e-15).
 - Attached to the flange: the camera housing (camera.housing_box_m in the camera frame, T_FC), the gripper body and
-  fingers (gripper.body_box_m / finger_box_m in the EE frame), a held plug (a cylinder under the held stem).
+  fingers (gripper.body_box_m / finger_box_m in the EE frame; with a side tool robot.side_tool's boxes in its arm frame),
+  a held plug (a cylinder under the held stem).
 - Rigid obstacles: the table; the tray as a solid block from the table up to its top (a stand under it included);
   the disc as a solid cylinder from the table up to its top.
 - Soft obstacles: the plants in the tray (upright cylinders on their cells) and in the disc (on their holes).
@@ -19,7 +20,7 @@ from functools import lru_cache
 import numpy as np
 
 from . import kinematics
-from .config import PROJECT_DIR, ee_to_contact, flange_to_ee
+from .config import PROJECT_DIR, ee_to_contact, flange_to_ee, tool_frame
 
 URDF = PROJECT_DIR / "data" / "third_party" / "fr3_build" / "fr3.urdf"
 
@@ -96,10 +97,18 @@ class World:
         size, ctr = _box(cfg["camera"]["housing_box_m"])
         att.append(("camera", C.Box(*size), T_FC @ _T(np.eye(3), ctr)))
         gcfg = cfg["gripper"]
-        size, ctr = _box(gcfg.get("body_box_m", [[-0.02, 0.02], [-0.045, 0.045], [-0.1034, 0.0]]))
-        att.append(("gripper", C.Box(*size), self.F @ _T(np.eye(3), ctr)))
-        size, ctr = _box(gcfg.get("finger_box_m", [[-0.009, 0.009], [-0.032, 0.032], [0.0, 0.0626]]))
-        att.append(("fingers", C.Box(*size), self.F @ _T(np.eye(3), ctr)))
+        T_FA = tool_frame(cfg)
+        if T_FA is not None:
+            # the side tool (robot.side_tool): its arm, the gripper housing and the fingers, boxes in the arm frame
+            st = cfg["robot"]["side_tool"]
+            for name, key in (("gripper", "body_box_m"), ("fingers", "finger_box_m")):
+                size, ctr = _box(st[key])
+                att.append((name, C.Box(*size), T_FA @ _T(np.eye(3), ctr)))
+        else:
+            size, ctr = _box(gcfg.get("body_box_m", [[-0.02, 0.02], [-0.045, 0.045], [-0.1034, 0.0]]))
+            att.append(("gripper", C.Box(*size), self.F @ _T(np.eye(3), ctr)))
+            size, ctr = _box(gcfg.get("finger_box_m", [[-0.009, 0.009], [-0.032, 0.032], [0.0, 0.0626]]))
+            att.append(("fingers", C.Box(*size), self.F @ _T(np.eye(3), ctr)))
         if held_below_m is not None:
             # the plug hangs under the held stem (fwd ahead of the contact point), ~30 mm wide, held_below_m deep
             T_stem = self.F @ self.G @ _T(np.eye(3), [0, 0, hold_forward_m])
