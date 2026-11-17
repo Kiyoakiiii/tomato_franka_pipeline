@@ -53,11 +53,15 @@ def main() -> int:
     T_FC, _ = load_T_FC(cfg)
     F, G = flange_to_ee(cfg), ee_to_contact(cfg)
     grid = json.loads((PROJECT_DIR / cfg["tray"]["grid_file"]).read_text())
-    disc = json.loads((PROJECT_DIR / "calibration" / "disc.json").read_text())
-    from seedling.disc import taken_holes
+    from seedling.disc import load_disc, taken_holes
+
+    disc = load_disc()  # None: no disc, or the last locate saw it gone (2026-11-16: an old one stood in the way)
+    if disc is None and (args.target == "centre" or args.target.upper().startswith("H")):
+        print("no disc located: no disc target")
+        return 1
 
     world = World(cfg, T_FC, grid, disc, tray_plants=list(grid.get("planted") or grid.get("occupied", [])),
-                  taken_holes=taken_holes(disc))
+                  taken_holes=taken_holes(disc) if disc is not None else [])
     robot = FrankyRobot(cfg, step_mode=False)
     q0 = robot.q()
     fwd = float(cfg["gripper"]["pin_brake"].get("close_forward_m", 0.0))

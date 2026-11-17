@@ -48,8 +48,9 @@ def main() -> int:
     q0 = np.array(args.start_q) if args.start_q is not None else robot.q()
 
     grid = json.loads((PROJECT_DIR / cfg["tray"]["grid_file"]).read_text())
-    df = PROJECT_DIR / "calibration" / "disc.json"
-    disc = json.loads(df.read_text()) if df.exists() else None
+    from seedling.disc import load_disc
+
+    disc = load_disc()  # None when the last picture saw it gone
     gone = set(filter(None, args.ignore_cells.split(",")))
     plants = [k for k in (grid.get("planted") or grid.get("occupied", [])) if k not in gone]
     taken = None

@@ -116,7 +116,8 @@ def main() -> int:
         dd["z_top"] = float(dd["z_top"]) + dz
         dd["free_holes"] = list(range(1, n_holes + 1))
         dd["occupied_holes"] = []
-        dd.pop("ok_last_picture", None)
+        for k_ in ("ok_last_picture", "absent", "absent_why"):  # the simulation puts a disc there
+            dd.pop(k_, None)
         (sb / "calibration" / "disc.json").write_text(json.dumps(dd, indent=1))
         (sb / ".tmp" / "sim_state.json").write_text(json.dumps({"q": cfg["tray"]["overview_q"]}))
         return sb

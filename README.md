@@ -41,7 +41,7 @@ seedling/               核心代码
   traygrid.py             从一张总览图定位托盘（格子模板 + 外轮廓交叉检查）、判断有苗穴位
   disc.py                 定位红色圆盘和空洞（洞口红圈；被叶子挡住时用外圈轮廓 + 转角）
   plugsense.py            近距离测土块顶面高度
-  grasp.py                侧向夹取的共用规则：夹哪里（穴位中心/近距离）、多高（土面高度和合爪高度）、手经过时离别的苗多远、手指下方的土、观察位（pick.py 和 plan.py 共用）
+  grasp.py                侧向夹取的共用规则：夹哪里（穴位中心/近距离）、多高（土面高度和合爪高度）、手经过时离别的苗多远、手指下方的土、观察位（plan.py 用，pick.py 的观察步骤也用）
   closeup.py              近距离重新定位要夹的穴位（观察位深度里周围 5×5 格的格壁，搜索不到半格）；grasp.closeup_xy 决定只记录（log）还是按它夹（apply）
   stemline.py             颜色掩码（绿色植物 / 褐色基质）与茎线双目三角化
   wrist.py                观察位规划、机械臂各部位离地检查、手到机械臂本体的距离（自碰撞）
@@ -65,6 +65,8 @@ experiments/            实验输出：tray/（每次定位的照片和叠加图
 
 ## 脚本
 
+规划只有一套：整盘程序（`plan.py`）。2026-11-16 起删掉了 `pick.py plan` / `place.py plan` 这两个旧的单株规划（用户要求），`pick.py`、`place.py` 只负责执行程序给出的规划。
+
 `P=.venvs/pipeline/bin/python`，都在项目根目录运行。
 
 | 用途 | 命令 | 会不会动 |
@@ -73,11 +75,11 @@ experiments/            实验输出：tray/（每次定位的照片和叠加图
 | 机械臂状态 | `$P scripts/robot_state.py` | 不会 |
 | 小步移动 | `$P scripts/robot_jog.py --dz 10` / `--home` | 会（每次确认） |
 | 托盘和圆盘定位 | `$P scripts/locate.py`（离线：`--frame experiments/tray/<id>/frame.npz --no-save`，默认用照片旁 tray_grid.json 里当天的相机位姿；`--pose current` 改用今天的标定） | 不会 |
-| 侧向夹取一株（分步） | `$P scripts/pick.py --cell C5 observe\|plan\|pregrasp\|approach\|lift\|lower\|retreat` | 会（plan 不会） |
+| 侧向夹取一株（分步执行，规划由 plan.py grasp 出） | `$P scripts/pick.py --cell C5 observe\|pregrasp\|approach\|lift\|lower\|retreat` | 会 |
 | 夹爪开合 | `$P scripts/gripper.py close\|open\|status` | 只动手指 |
 | 回总览位 | `$P scripts/goto_overview.py [--dry-run]` | 会 |
-| 一株完整流程 | `$P scripts/cycle.py --cell C5 --place 3`（或 `--put-back` 放回原处） | 会 |
-| 放进圆盘（分步） | `$P scripts/place.py plan --cell C5 --free 1,2,3` | plan 不会 |
+| 一株完整流程 | `$P scripts/cycle.py --cell C5 --place 3`（或 `--put-back` 放回原处；都用整盘程序的规划，要先 `plan.py build`，需要定位到容器） | 会 |
+| 放进圆盘（分步执行，规划由 plan.py place 出） | `$P scripts/place.py carry\|insert\|retreat --cell C5` | 会 |
 | 全自动移植（程序流程） | `$P scripts/run.py [--max-plants N] [--no-locate] [--reteach]`（`run_transplant.sh` 用的就是它） | 会 |
 | 建程序 / 单株夹取或放置计划 | `$P scripts/plan.py build` / `grasp --cell C5` / `place --cell C5 --hole 3` | 不会 |
 | 托盘、圆盘放哪里更好 | `$P scripts/layout_check.py [--tray]` | 不会 |

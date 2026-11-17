@@ -5,7 +5,7 @@
 2. the program: taught for this layout (or the one taught before, if the layout is the same), checked for the job;
 3. per plant, in the user's order (nearest row first, right to left) into the holes in the program's order (farthest
    first): the template moved to its cell and hole (plan.py grasp / place, ~2 s, no search), then the cycle (cycle.py
-   --program --no-return): observe close up, the template at the measured soil height, pre-grasp, approach, close,
+   --no-return): observe close up, the template at the measured soil height, pre-grasp, approach, close,
    lift, carry (the hand flat), insert, open, retreat; from there straight to the next plant's observation pose. After
    each plant its cell counts as empty and its hole as taken (written to the grid and disc files);
 4. at the end, back at the overview, one picture: each plant's cell empty and its hole taken.
@@ -254,7 +254,7 @@ def _run(args, cfg, gdir, stop, run, env_plan, sim=False, camera_ready=None) -> 
                 ahead["thread"] = threading.Thread(target=plan_ahead, daemon=True)
                 ahead["thread"].start()
             no_obs = (program() or {}).get("cells", {}).get(k, {}).get("observe") == "none"
-            rc, _ = run(["scripts/cycle.py", "--cell", k, "--lift-mm", "100", "--place", str(hole), "--no-return", "--program",
+            rc, _ = run(["scripts/cycle.py", "--cell", k, "--place", str(hole), "--no-return",
                          *(["--no-observe"] if no_obs else [])])
             if rc == 3:
                 print(f"the cycle for {k} found no safe plan after the close-up (nothing touched): {k} left, on with the next")

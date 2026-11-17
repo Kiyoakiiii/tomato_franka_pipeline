@@ -154,3 +154,25 @@ def observe_pose(cfg: dict, grid: dict, cell: str, T_FC: np.ndarray, tray_top: f
     q0 = np.array(cfg["tray"]["overview_q"], float) if q_from is None else np.asarray(q_from, float)
     return plan_observation(np.array([c[0], c[1], guess]), q0, T_FC, guess + 0.15, c2, valid=valid,
                             _global_ik=False if near_only else None)
+
+
+def load_observation(path: Path, grid: dict, cell: str, tol: float = 0.003, log=print) -> dict | None:
+    """the close-up record of this cell (pick.py observe: <cell>_observe.json), or None when there is none or it was
+    made for another fit of the tray: no overview_cell (records before 2026-11-11) or the cell moved more than tol
+    since. 2026-11-16: an 11-06 record (the tray then 12 cm higher) put an offline plan's closing point 14 cm above
+    the soil; a run with --no-observe would have used it too"""
+    import json
+
+    path = Path(path)
+    if not path.exists():
+        return None
+    obs = json.loads(path.read_text())
+    oc = obs.get("overview_cell")
+    if oc is None:
+        log(f"close-up record of {cell} not used: made before the records said for which tray fit ({path.name})")
+        return None
+    d = float(np.linalg.norm(np.asarray(oc, float)[:3] - np.asarray(grid["cells"][cell], float)[:3]))
+    if d > tol:
+        log(f"close-up record of {cell} not used: made for another tray fit (the cell {d * 1000:.0f} mm away since)")
+        return None
+    return obs

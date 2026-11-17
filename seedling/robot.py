@@ -227,8 +227,9 @@ class StateSimRobot(RobotBase):
             json.dump(st, open(self.path, "w"))
             return MotionResult(True, "", False, 0.0)
         grid = json.loads((PROJECT_DIR / self.cfg_["tray"]["grid_file"]).read_text())
-        df = PROJECT_DIR / "calibration" / "disc.json"
-        disc = json.loads(df.read_text()) if df.exists() else None
+        from .disc import load_disc
+
+        disc = load_disc()
         T_FC, _ = load_T_FC(self.cfg_)
         # at the plant the fingers and the plants are meant to touch: only rigid things and the arm itself are checked
         m, where = World(self.cfg_, T_FC, grid, disc).worst(qa, q, fingers=False, plants=False, plug=False)

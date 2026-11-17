@@ -1,16 +1,17 @@
 #!/usr/bin/env python
 """One plant, the whole cycle, from the overview pose and back:
-observe (soil height of this plug) -> plan -> pre-grasp (turn high, go down) -> approach -> close -> lift
+observe (soil height of this plug) -> plan (the program's: plan.py grasp) -> pre-grasp (turn high, go down) -> approach -> close -> lift
 -> [put back: lower -> open] -> retreat -> overview, or with --place: -> carry to the disc -> insert -> open
--> retreat -> overview (place.py; the disc located by locate.py).
+-> retreat -> overview (place.py; the disc located by locate.py). The plans are the program's (plan.py, after
+plan.py build; 2026-11-16: the old per-plant planners of pick.py / place.py removed, one planner only).
 
 Every step is a separate script (pick.py / gripper.py / goto_overview.py) and stops the cycle if it fails or refuses. Between steps the
 file experiments/grasp/STOP is checked: create it (touch) to stop after the current step, so that no motion is
 cut off in the middle (which puts the robot into an error state). The tray must have been located first
 (locate.py, from the overview pose).
 
-    .venvs/pipeline/bin/python scripts/cycle.py --cell C5 --lift-mm 60 --put-back
-    .venvs/pipeline/bin/python scripts/cycle.py --cell C5 --lift-mm 60 --place 1   # transplant into disc hole 1
+    .venvs/pipeline/bin/python scripts/cycle.py --cell C5 --put-back     # (a program built: plan.py build)
+    .venvs/pipeline/bin/python scripts/cycle.py --cell C5 --place 1   # transplant into disc hole 1
     touch experiments/grasp/STOP          # stop after the current step
 """
 from __future__ import annotations
@@ -30,21 +31,16 @@ from seedling.config import PROJECT_DIR
 def main() -> int:
     ap = base_parser(__doc__)
     ap.add_argument("--cell", required=True)
-    ap.add_argument("--lift-mm", type=float, default=60.0)
     ap.add_argument("--put-back", action="store_true", help="after lifting, put the plant back and let go")
-    ap.add_argument("--pitch-deg", type=float, nargs="+", default=None, help="grasp pitches to try (pick.py plan; default from the config)")
     ap.add_argument("--no-return", action="store_true", help="after placing, stay above the disc (run.py goes straight on to the next "
                     "plant's observation pose; the tray and disc are located once per run)")
-    ap.add_argument("--program", action="store_true", help="the plan steps from the taught program (plan.py grasp / place: the "
-                    "template moved to this cell and hole, no search); needs --place HOLE")
     ap.add_argument("--no-observe", action="store_true", help="no close-up (the program has no observation pose for this "
                     "plant): grasped at the estimated height")
-    ap.add_argument("--max-replans", type=int, default=2, help="grasp planned again (another pose) this often when no placement is found from it")
     ap.add_argument("--inproc", action="store_true", help="every step but the gripper's in this process (seedling.inproc: "
                     "loaded and connected once; run.py runs its cycles so) instead of a new process each")
     ap.add_argument("--hold-s", type=float, default=0.5, help="pause at the top of the lift (2 s until 2026-11-02)")
     ap.add_argument("--place", type=int, nargs="?", const=0, default=None, metavar="HOLE",
-                    help="transplant: put the plant into this disc hole (1..6; no number: the planner's choice)")
+                    help="transplant: put the plant into this disc hole (1..6; no number: the program's hole for it)")
     args = ap.parse_args()
 
     stop = PROJECT_DIR / "experiments" / "grasp" / "STOP"
@@ -54,8 +50,7 @@ def main() -> int:
     py = sys.executable
     c = ["--cell", args.cell]
     steps = [("observe the plug", ["scripts/pick.py", "observe", *c]),
-             ("plan", ["scripts/pick.py", "plan", *c, "--lift-mm", str(args.lift_mm),
-                       *(["--pitch-deg", *map(str, args.pitch_deg)] if args.pitch_deg else [])]),
+             ("plan", ["scripts/plan.py", "grasp", *c, *(["--hole", str(args.place)] if args.place else [])]),
              ("pre-grasp", ["scripts/pick.py", "pregrasp", *c]),
              ("approach", ["scripts/pick.py", "approach", *c]),
              ("close", ["scripts/gripper.py", "close"]),
@@ -63,17 +58,10 @@ def main() -> int:
     if args.no_observe:
         # no close-up: from the overview pose, as the program checked the turn from there (plan.py build)
         steps = [("to the overview", ["scripts/goto_overview.py"])] + steps[1:]
-    if args.program:
-        if not args.place:
-            print("--program needs --place HOLE")
-            return 1
-        steps[[n for n, _ in steps].index("plan")] = ("plan", ["scripts/plan.py", "grasp", *c, "--hole", str(args.place)])
-        args.max_replans = 0
     if args.place is not None:
         h = [] if args.place == 0 else ["--hole", str(args.place)]
         # the place plan right after the grasp plan: refuse before touching the plant if the hole is out of reach
-        steps.insert([n for n, _ in steps].index("plan") + 1, ("plan the placement", ["scripts/plan.py", "place", *c, *h, "--other-holes"] if args.program
-                         else ["scripts/place.py", "plan", *c, *h]))
+        steps.insert([n for n, _ in steps].index("plan") + 1, ("plan the placement", ["scripts/plan.py", "place", *c, *h, "--other-holes"]))
         steps += [("carry to the disc", ["scripts/place.py", "carry", *c]),
                   ("insert into the hole", ["scripts/place.py", "insert", *c]),
                   ("open", ["scripts/gripper.py", "open"]),
@@ -85,9 +73,6 @@ def main() -> int:
                   ("open", ["scripts/gripper.py", "open"]),
                   ("retreat", ["scripts/pick.py", "retreat", *c]),
                   ("back to the overview", ["scripts/goto_overview.py"])]
-    gdir = PROJECT_DIR / "experiments" / "grasp"
-    npf = gdir / f"{args.cell}_no_place.json"  # kept from the selection (run.py clears it when it plans this plant)
-    replans = 0
     import os
 
     sim = bool(os.environ.get("SEEDLING_SIM_STATE"))  # the whole-run simulation: no gripper (its scripts not run)
@@ -115,17 +100,6 @@ def main() -> int:
         t_s = time.time()
         rc = run_step(cmd)
         t_steps[name] = round(time.time() - t_s, 2)
-        while rc != 0 and name == "plan the placement" and replans < args.max_replans:
-            # no placement from this grasp pose (the hand stays flat while carrying: the grasp's joint configuration
-            # decides): another grasp pose (pick.py leaves out the ones in {cell}_no_place.json), then the placement again
-            replans += 1
-            avoid = json.loads(npf.read_text()) if npf.exists() else []
-            avoid.append(json.loads((gdir / f"{args.cell}_side_plan.json").read_text())["q"]["grasp"])
-            npf.write_text(json.dumps(avoid))
-            print(f">>> no placement from this grasp: the grasp planned again without it ({replans}/{args.max_replans})", flush=True)
-            if run_step(dict(steps)["plan"]) != 0:
-                break
-            rc = run_step(cmd)
         if rc != 0:
             print(f"step {i} ({name}) failed or refused (exit {rc}): cycle stopped", flush=True)
             # exit 3: no plan, the plant not touched (the arm at most at the observation pose): run.py goes on with another

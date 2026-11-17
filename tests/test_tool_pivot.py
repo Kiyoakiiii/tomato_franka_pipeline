@@ -59,7 +59,8 @@ def test_weight_from_two_headings_cancels_the_offset():
 
 def test_joint7_range_of_the_side_tool_narrows_every_check(cfg):
     """2026-11-16: with joint 7 above -14 deg the camera on the side tool runs into the wrist; the config's range is
-    applied to the joint limits every IK and joint move reads (the old overview pose, +41 deg, is refused)"""
+    applied to the joint limits every IK and joint move reads (the old overview pose, +41 deg, is refused; the
+    configured overview and home poses are inside)"""
     from seedling import kinematics
     from seedling.robot import SimRobot, UnsafeTarget
     import pytest
@@ -68,5 +69,6 @@ def test_joint7_range_of_the_side_tool_narrows_every_check(cfg):
     assert np.isclose(np.degrees(kinematics.Q_MAX[6]), hi) and np.isclose(np.degrees(kinematics.Q_MIN[6]), max(lo, -172.8), atol=0.05)
     r = SimRobot(cfg, step_mode=False)
     with pytest.raises(UnsafeTarget):
-        r.move_joints(np.array(cfg["tray"]["overview_q"], float))
+        r.move_joints(np.array([0.086, -1.095, -0.163, -2.261, -0.167, 1.714, 0.710]))  # the old overview pose
     assert r.move_joints(np.array(cfg["robot"]["home_joints_rad"], float)).ok
+    assert r.move_joints(np.array(cfg["tray"]["overview_q"], float)).ok

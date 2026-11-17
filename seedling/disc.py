@@ -264,3 +264,64 @@ def occupied_from_view(disc: dict, points_B, prior: dict | None = None, r: float
             np.hypot(*(np.subtract(prior["centre"][:2], disc["centre"][:2]))) < 0.010:
         out += [h for h in prior["occupied_holes"] if h not in free and h not in out]
     return sorted(out)
+
+
+def disc_absent(frame: Frame, T_BC: np.ndarray, prev: dict, table_z: float, radius: float = 0.09, margin_px: int = 20,
+                min_points: int = 500, max_high_share: float = 0.03, above: float = 0.02, tray_cells: dict | None = None,
+                tray_pad: float = 0.06) -> tuple[bool, str]:
+    """(True, why) when the disc of the last record is gone: its whole footprint (radius, at its top height and at the
+    table) in the picture and the points there at the table (at most max_high_share more than `above` over it).
+    Hidden (an arm, leaves) or out of the picture: (False, why), the old record kept as an obstacle. tray_cells: the
+    tray located in the same picture; its footprint (cell centres + tray_pad: half a cell, the rim and a stacked tray's
+    flange reach ~55 mm past the outer cell centres, 2026-11-16) is left out (a tray moved onto part of where the disc
+    stood). 2026-11-16: the
+    disc of 11-06 was taken away; still in disc.json it stood between the robot and the tray and bent the paths around
+    plants that were not there"""
+    from .transforms import inv_T
+
+    c = np.asarray(prev.get("centre") or [np.nan, np.nan], float)[:2]
+    if not np.all(np.isfinite(c)):
+        return False, "no earlier disc position"
+    H, W = frame.rgb.shape[:2]
+    T_CB = inv_T(T_BC)
+    t = np.linspace(0, 2 * np.pi, 36, endpoint=False)
+    for z in (float(prev.get("z_top", table_z + 0.06)), table_z):
+        ring = np.column_stack([c[0] + radius * np.cos(t), c[1] + radius * np.sin(t), np.full_like(t, z)])
+        pc = apply_T(T_CB, ring)
+        if (pc[:, 2] <= 0).any():
+            return False, "the earlier disc position is behind the camera"
+        uv = (frame.intr.K() @ (pc / pc[:, 2:3]).T).T[:, :2]
+        if (uv[:, 0] < margin_px).any() or (uv[:, 1] < margin_px).any() or (uv[:, 0] > W - margin_px).any() or (uv[:, 1] > H - margin_px).any():
+            return False, "the earlier disc position is not fully in the picture"
+    ok = np.isfinite(frame.xyz).all(-1)
+    P = apply_T(T_BC, frame.xyz[ok])
+    inside = np.hypot(P[:, 0] - c[0], P[:, 1] - c[1]) < radius
+    if tray_cells:
+        C_ = np.array([v[:2] for v in tray_cells.values()], float)
+        o = C_.mean(0)
+        _, _, Vt = np.linalg.svd(C_ - o)
+        A_ = (C_ - o) @ Vt.T
+        lo, hi = A_.min(0) - tray_pad, A_.max(0) + tray_pad
+        Q_ = (P[:, :2] - o) @ Vt.T
+        inside &= ~np.all((Q_ >= lo) & (Q_ <= hi), axis=1)
+    n = int(inside.sum())
+    if n < min_points:
+        return False, f"too few depth points where the disc was ({n})"
+    high = float(np.mean(P[inside, 2] > table_z + above))
+    if high > max_high_share:
+        return False, f"something stands where the disc was ({high * 100:.0f}% of the points above the table)"
+    return True, f"gone: the table where it was ({n} points, {high * 100:.1f}% above it)"
+
+
+def load_disc(path=None) -> dict | None:
+    """the disc record (calibration/disc.json), or None when there is none or the last picture saw it gone"""
+    import json
+    from pathlib import Path
+
+    from .config import PROJECT_DIR
+
+    p = Path(path) if path else PROJECT_DIR / "calibration" / "disc.json"
+    if not p.exists():
+        return None
+    d = json.loads(p.read_text())
+    return None if d.get("absent") else d

@@ -121,7 +121,17 @@ def main() -> int:
         # mark the saved disc as not found in this picture (the transplant loop must not use an old free-hole list); the
         # position is kept as the prior for the next picture
         if prev and prev.get("ok"):
-            dp.write_text(json.dumps({**prev, "ok_last_picture": False, "last_status": d["status"]}, indent=1))
+            from seedling.disc import disc_absent
+
+            tz = float(rec.get("table_z_picture", rec.get("table_z", 0.0)) or 0.0)
+            gone, why = disc_absent(frame, T_BC, prev, tz, tray_cells=g.cells if g.ok else None)
+            if not gone and prev.get("absent"):
+                # seen gone in an earlier picture and not found since: still gone (a picture that cannot see where it
+                # was says nothing; 2026-11-16 the next overview pose did not see the whole spot and put it back)
+                gone, why = True, f"{prev.get('absent_why', 'gone in an earlier picture')}; this picture: {why}"
+            print(f"disc not found; where it was: {why}")
+            dp.write_text(json.dumps({**prev, "ok_last_picture": False, "last_status": d["status"], "absent": gone,
+                                      "absent_why": why}, indent=1))
     if (out / "cells.jpg").exists():
         print("overlay", (out / "cells.jpg").relative_to(PROJECT_DIR))
     return 0 if g.ok else 1

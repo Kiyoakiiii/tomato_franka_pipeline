@@ -63,7 +63,12 @@ def main() -> int:
     t0 = time.time()
     T_FC, _ = load_T_FC(cfg)
     grid = json.loads(((PROJECT_DIR / args.grid) if args.grid else (PROJECT_DIR / cfg["tray"]["grid_file"])).read_text())
-    disc = json.loads((PROJECT_DIR / "calibration" / "disc.json").read_text())
+    from seedling.disc import load_disc
+
+    disc = load_disc()
+    if disc is None:
+        print("no container: calibration/disc.json missing, or the last locate saw the disc gone")
+        return 1
     if args.free is not None:
         disc["free_holes"] = [int(h) for h in args.free.split(",") if h]
         disc["occupied_holes"] = [h for h in range(1, len(disc["holes"]) + 1) if h not in disc["free_holes"]]
@@ -429,7 +434,9 @@ def main() -> int:
 
             robot_q = FrankyRobot(cfg, step_mode=False).q()
         obs_file = OUT / f"{args.cell}_observe.json"
-        obs = json.loads(obs_file.read_text()) if obs_file.exists() and not args.from_observe else None
+        from seedling.grasp import load_observation
+
+        obs = load_observation(obs_file, grid, args.cell) if not args.from_observe else None
         if obs is not None:
             # the cell where the close-up put it (grasp.closeup_xy: apply), else the overview's: grid is the program's
             # (prog.grid), so the template is moved there and the hand's way in is checked from there
@@ -465,6 +472,11 @@ def main() -> int:
 
     # place
     gp = json.loads((OUT / f"{args.cell}_side_plan.json").read_text())
+    if args.hole is None:
+        # no hole given (cycle.py --place without a number): the program's hole for this plant, else the first free one
+        # in the program's order
+        h_prog = (prog.cell_prog.get(args.cell) or {}).get("hole")
+        args.hole = int(h_prog) if h_prog in free else next((h for h in prog.hole_order if h in free), None)
     if args.hole not in free:
         print(f"refused: H{args.hole} is taken; free: {free}")
         return 1
