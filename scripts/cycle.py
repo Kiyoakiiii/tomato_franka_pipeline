@@ -56,8 +56,10 @@ def main() -> int:
              ("close", ["scripts/gripper.py", "close"]),
              ("lift", ["scripts/pick.py", "lift", *c])]
     if args.no_observe:
-        # no close-up: from the overview pose, as the program checked the turn from there (plan.py build)
-        steps = [("to the overview", ["scripts/goto_overview.py"])] + steps[1:]
+        # no close-up: planned from where the arm is (after the last plant: above the disc, straight on as on a line;
+        # 2026-11-18 user: no trip to the overview between plants). The plan step checks the turn from there against the
+        # world; only if it finds none, the overview and the plan once more (below)
+        steps = steps[1:]
     if args.place is not None:
         h = [] if args.place == 0 else ["--hole", str(args.place)]
         # the place plan right after the grasp plan: refuse before touching the plant if the hole is out of reach
@@ -99,6 +101,13 @@ def main() -> int:
             continue
         t_s = time.time()
         rc = run_step(cmd)
+        if rc != 0 and name == "plan" and args.no_observe and not stop.exists():
+            # no way from here (above the disc): from the overview, as the program checked it
+            print("no plan from where the arm is: to the overview and planned from there", flush=True)
+            if run_step(["scripts/goto_overview.py"]) != 0:
+                print(f"step {i} ({name}): the overview not reached: cycle stopped", flush=True)
+                return 1
+            rc = run_step(cmd)
         t_steps[name] = round(time.time() - t_s, 2)
         if rc != 0:
             print(f"step {i} ({name}) failed or refused (exit {rc}): cycle stopped", flush=True)

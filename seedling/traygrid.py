@@ -420,29 +420,52 @@ def draw_cells(frame: Frame, T_BC: np.ndarray, cells: dict) -> np.ndarray:
 
 
 def occupied_cells(frame: Frame, T_BC: np.ndarray, cells: dict, z_top: float, cfg: dict,
-                   plug_dz: float = 0.013, min_peat: float = 0.10) -> dict:
-    """Cells holding a plug: peat colour on a ring 9-15 mm around the cell centre at plug-top height. The plug's
-    rim usually shows beside the leaves; an empty cell is black plastic there, also under a neighbour's
-    overhanging leaves (2026-10-22, top view: the 12 plugs 0.06-0.76, the 60 empty cells 0.00). Dense depth
-    was tried first and is unreliable under leaves. {cell: peat fraction}.
-    min_peat 0.10 since 2026-11-04 (0.03 before): seen at an angle (60 deg overview) the side of a plug covers the ring
-    of the empty cell in front of it (0.03-0.08: B6-B8; the arm went for the empty B8). A plug hidden under leaves
-    can read lower and is then found once the plants in front of it are gone: missed for now is safer than an
-    empty cell taken for a plug."""
-    from .stemline import substrate_mask
+                   plug_dz: float = 0.013, min_peat: float = 0.20, own_margin: float = 0.004, min_seen: int = 10,
+                   hidden: list | None = None) -> dict:
+    """Cells holding a plug: peat colour on rings 9-15 mm around the cell centre at plug-top height. {cell: peat fraction}.
+
+    2026-11-19: only ring points whose line of sight stays in the cell: the camera looks down at ~45 deg, so on an empty
+    cell the ray through a ring point (nothing there at plug-top height) goes on down into the next cell and showed that
+    cell's plug side (A7 behind B7: 0.01-0.11 against the 0.10 threshold, taken for a plug in two runs of 2026-11-19; D3
+    up to 0.24). A ring point counts only if the ray, carried on down to the tray top, still ends inside its own cell
+    (own_margin from the border). Leaf pixels (green) are left out of the count: a plug under its own or a neighbour's
+    leaves is judged on the soil that shows; with fewer than min_seen points showing it is not judged (listed in hidden,
+    not taken: missed for now is safer than an empty cell taken for a plug).
+    Checked on 9 overview pictures of 2026-11-17..19 (the pose of 2026-11-17): no empty cell over 0.17 (old rule: 7 empty
+    cells over its 0.10 in one picture), plugs 0.23 and up where the soil colour shows (dark, shaded plugs can read
+    0: colour alone)."""
+    from .stemline import _mask, substrate_mask
 
     soil = substrate_mask(frame.rgb, cfg["stemline"])
+    green = _mask(frame.rgb, cfg["stemline"])
     T_CB = inv_T(T_BC)
+    cam = np.asarray(T_BC, float)[:3, 3]
     H, W = soil.shape
+    names = list(cells)
+    C = np.array([cells[k][:2] for k in names], float)
     ang = np.linspace(0, 2 * np.pi, 48, endpoint=False)
     out = {}
-    for k, (x, y, _) in cells.items():
+    for i, k in enumerate(names):
+        x, y, _ = cells[k]
         pts = np.array([[x + r * np.cos(a), y + r * np.sin(a), z_top + plug_dz] for r in (0.009, 0.012, 0.015) for a in ang])
         uv = np.round(frame.intr.project(apply_T(T_CB, pts))).astype(int)
         inside = (uv[:, 0] >= 0) & (uv[:, 0] < W) & (uv[:, 1] >= 0) & (uv[:, 1] < H)
         if inside.mean() < 0.9:
             continue
-        frac = float(soil[uv[inside, 1], uv[inside, 0]].mean())
+        # where the ray through each ring point reaches the tray top: still in this cell?
+        d = pts - cam
+        q = pts[:, :2] + ((z_top - pts[:, 2]) / d[:, 2])[:, None] * d[:, :2]
+        dist = np.linalg.norm(q[:, None, :] - C[None], axis=2)
+        own = dist[:, i].copy()
+        dist[:, i] = np.inf
+        m = inside & (own + 2 * own_margin < dist.min(1))
+        seen = m.copy()
+        seen[m] = ~green[uv[m, 1], uv[m, 0]]
+        if seen.sum() < min_seen:
+            if hidden is not None:
+                hidden.append(k)
+            continue
+        frac = float(soil[uv[seen, 1], uv[seen, 0]].mean())
         if frac >= min_peat:
             out[k] = round(frac, 2)
     return out

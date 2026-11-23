@@ -72,3 +72,17 @@ def test_joint7_range_of_the_side_tool_narrows_every_check(cfg):
         r.move_joints(np.array([0.086, -1.095, -0.163, -2.261, -0.167, 1.714, 0.710]))  # the old overview pose
     assert r.move_joints(np.array(cfg["robot"]["home_joints_rad"], float)).ok
     assert r.move_joints(np.array(cfg["tray"]["overview_q"], float)).ok
+
+
+def test_joint6_lower_limit_from_the_config(cfg):
+    """2026-11-17: the arm stood at joint 6 = 0.424 without an error (datasheet 0.5445); robot.joint6_min_rad sets the
+    lower limit every check reads: the hand-placed pose at 0.516 is a valid target, one below 0.424 is refused"""
+    from seedling import kinematics
+    from seedling.robot import SimRobot, UnsafeTarget
+    import pytest
+
+    assert np.isclose(kinematics.Q_MIN[5], cfg["robot"]["joint6_min_rad"]) and cfg["robot"]["joint6_min_rad"] < 0.5445
+    r = SimRobot(cfg, step_mode=False)
+    assert r.move_joints(np.array([0.042, -0.679, -0.08, -1.905, -0.222, 0.516, -2.521])).ok
+    with pytest.raises(UnsafeTarget):
+        r.move_joints(np.array([0.042, -0.679, -0.08, -1.905, -0.222, 0.40, -2.521]))

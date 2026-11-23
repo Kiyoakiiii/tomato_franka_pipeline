@@ -32,11 +32,16 @@ Q_MIN_FR3, Q_MAX_FR3 = Q_MIN.copy(), Q_MAX.copy()
 
 
 def apply_tool_limits(cfg: dict) -> None:
-    """Narrow the joint ranges in place (every IK, plan and joint move's check reads Q_MIN / Q_MAX) for the tool on the
-    flange: robot.side_tool.joint7_range_deg (2026-11-16: the camera on the side tool's post runs into the wrist (link 6)
-    with joint 7 above -14 deg, measured by hand; past it only by going through the wrist). Without it the FR3 ranges."""
+    """Set the joint ranges in place (every IK, plan and joint move's check reads Q_MIN / Q_MAX) from the config:
+    robot.side_tool.joint7_range_deg narrows joint 7 for the tool on the flange (2026-11-16: the camera on the side
+    tool's post runs into the wrist (link 6) with joint 7 above -14 deg, measured by hand; past it only by going through
+    the wrist); robot.joint6_min_rad replaces the datasheet's lower limit of joint 6 (2026-11-17: this arm stood at
+    0.424 without an error, the datasheet says 0.5445). Without them the FR3 ranges."""
     Q_MIN[:] = Q_MIN_FR3
     Q_MAX[:] = Q_MAX_FR3
+    j6 = (cfg.get("robot") or {}).get("joint6_min_rad")
+    if j6 is not None:
+        Q_MIN[5] = float(j6)
     r7 = ((cfg.get("robot") or {}).get("side_tool") or {}).get("joint7_range_deg")
     if r7:
         Q_MIN[6] = max(Q_MIN_FR3[6], math.radians(float(r7[0])))

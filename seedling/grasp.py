@@ -41,7 +41,8 @@ def grasp_cell(grid: dict, cell: str, obs: dict | None, cfg: dict, log=print) ->
 
 
 def soil_info(grid: dict, cell: str, obs: dict | None, tray_top: float, disagree: float = DISAGREE, plug_dz: float = PLUG_DZ,
-              leafy_cover: float = LEAFY_COVER, heights: tuple = (HEIGHT_SURE, HEIGHT_EST, HEIGHT_LEAFY)) -> dict:
+              leafy_cover: float = LEAFY_COVER, heights: tuple = (HEIGHT_SURE, HEIGHT_EST, HEIGHT_LEAFY),
+              uniform_dz: float | None = None) -> dict:
     """the soil surface of this plug and the closing height above it:
     - the close-up's, unless its soil patch lay off the cell centre and higher than the overview's (D6 2026-10-28:
       +27 mm, 15 mm off centre, grasped above the stem): the overview's then, still counted as measured;
@@ -52,6 +53,12 @@ def soil_info(grid: dict, cell: str, obs: dict | None, tray_top: float, disagree
     soil_low: the lowest reading, for the plug's length below the held stem (2026-11-06: the close-ups read 13-16 mm
     above the overview, the higher taken, the plug 20 mm longer than planned, pushed onto the hole edge)."""
     h_sure, h_est, h_leafy = heights
+    if uniform_dz is not None:
+        # no close-ups (tray.closeup false, 2026-11-17 the user: every plug's soil at the same height, for speed): the
+        # plug top at tray top + uniform_dz for every plant, taken as known; no reading (overview or close) used
+        s_ = float(tray_top + uniform_dz)
+        return {"soil": s_, "soil_low": s_, "src": f"uniform plug height: tray top + {uniform_dz * 1000:.0f} mm (no close-up)",
+                "sure": True, "height": float(h_sure), "leafy": False, "leaf_cover": None}
     z_ov = (grid.get("soil_z_overview") or {}).get(cell)
     m = (obs or {}).get("measure") or {}
     z_near = m.get("soil_z") if m.get("ok") else None

@@ -107,7 +107,7 @@ def main() -> int:
         g = json.loads(json.dumps(base_grid))
         g["cells"] = {k: [v[0] + t[0], v[1] + t[1], v[2] + tz] for k, v in g["cells"].items()}
         g["z_top"] = float(g["z_top"]) + tz
-        g["soil_z_overview"] = {k: v + tz for k, v in (g.get("soil_z_overview") or {}).items()}
+        g["soil_z_overview"] = {k: (None if v is None else v + tz) for k, v in (g.get("soil_z_overview") or {}).items()}
         (sb / cfg["tray"]["grid_file"]).parent.mkdir(parents=True, exist_ok=True)
         (sb / cfg["tray"]["grid_file"]).write_text(json.dumps(g, indent=1))
         dd = json.loads(json.dumps(base_disc))

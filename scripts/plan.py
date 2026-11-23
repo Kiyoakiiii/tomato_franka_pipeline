@@ -55,6 +55,12 @@ def main() -> int:
     ap.add_argument("--reteach", action="store_true", help="build: teach again even if the layout did not change")
     args = ap.parse_args()
     cfg = config_from_args(args)
+    # close-ups on or off (tray.closeup; 2026-11-17 off: every plug's soil at tray top + tray.plug_top_above_tray_m)
+    closeup = bool(cfg["tray"].get("closeup", True))
+    uniform_dz = None if closeup else float(cfg["tray"]["plug_top_above_tray_m"])
+
+    def soil_of(grid_, cell_, obs_, tray_top_):
+        return soil_info(grid_, cell_, obs_ if closeup else None, tray_top_, uniform_dz=uniform_dz)
 
     from seedling.calibration import load_T_FC
     from seedling.program import Program
@@ -135,7 +141,8 @@ def main() -> int:
         # were (within 5 mm / 1 deg) and it was made with the same approach direction
         old = json.loads(PROG.read_text()) if PROG.exists() and not args.reteach else None
         if old is not None and old.get("configs") and prog.same_layout(old.get("layout", {})) and \
-                abs(float(old.get("approach_deg", -999)) - args.approach_deg) < 1e-6:
+                abs(float(old.get("approach_deg", -999)) - args.approach_deg) < 1e-6 and \
+                bool(old.get("closeup", True)) == closeup and old.get("uniform_dz") == uniform_dz:
             prog.load(old)
             print(f"the tray and the disc are where they were: the program taught then is used ({len(prog.configs)} configuration(s))")
             ok = True
@@ -150,7 +157,8 @@ def main() -> int:
         def save(building=True):
             # after every plant: the run starts with the first plant while the others are worked out
             if PROG_SAVE:
-                save_program({**prog.to_dict(), "approach_deg": args.approach_deg, "no_way": no_way, "building": building})
+                save_program({**prog.to_dict(), "approach_deg": args.approach_deg, "closeup": closeup, "uniform_dz": uniform_dz,
+                              "no_way": no_way, "building": building})
 
         # the whole job once, in its order (each plant's cell gone after it, each hole taken after it): which plants and
         # holes the program reaches
@@ -185,7 +193,7 @@ def main() -> int:
                 if k in prog.cell_prog:
                     # its program is known: which of the holes left it goes into (the plan, ~0.5 s)
                     r = grasp_plan(prog, k, cfg, grid, disc, None, [p for p in planted if p not in done], world_disc, check_pieces,
-                                   dict(soil_info(grid, k, None, prog.tray_top), pitch_deg=float(prog.cell_prog[k].get("pitch_deg", 0.0))),
+                                   dict(soil_of(grid, k, None, prog.tray_top), pitch_deg=float(prog.cell_prog[k].get("pitch_deg", 0.0))),
                                    args, write=False, variant=prog.cell_prog[k],
                                    stems=[x for x in occupied if x not in done], taken_extra=[x for x in holes if x not in left_holes])
                     h_ok = None
@@ -227,7 +235,7 @@ def main() -> int:
                     save()
                     print(f"  {k}: no way last time; worked out again after the others", flush=True)
                     continue
-                si_k = soil_info(grid, k, None, prog.tray_top)
+                si_k = soil_of(grid, k, None, prog.tray_top)
                 found, why_k = None, []
                 grasped = [False]  # some variant grasps it (then failing means no hole left that a flat hand reaches)
                 placed_any = [False]  # ... and some variant places it (then it failed on its observation pose / turn)
@@ -305,7 +313,7 @@ def main() -> int:
                         # the cycle itself uses after the close-up, plan.py grasp: up to 3 s, kept near the natural posture).
                         # Checked with the standard turn only, plants the cycle does were refused and blocked the rows
                         # behind them (2026-11-10, a full tray in real time: 55 of 72)
-                        for ts_ in (False, True):
+                        for ts_ in ((False, True) if closeup else ()):  # close-ups off: none (from the overview)
                             for q_from, m_ in ((np.array(r["q"]["stage"]), "near"), (None, "overview")):
                                 pl_o = observe_pose(cfg, grid, k, T_FC, prog.tray_top, q_from=q_from, near_only=(m_ == "overview"),
                                                     valid=obs_valid_for(taken_b, sorted(set(p for p in planted if p not in done) | {k})))
@@ -331,7 +339,7 @@ def main() -> int:
                         v_["observe_desc"] = pl_o.desc if q_obs is not None else ""
                         rob = robust(v_, ci, q_obs, h, z_nom=float(r["z_close"])) if mode != "none" else True
                         note_ = note + ("" if mode != "none" else ", no close-up") + ("" if rob else ", NOT checked robust")
-                        if mode != "none" and rob:
+                        if (mode != "none" or not closeup) and rob:
                             return (h, r, note_, v_)
                         score = (rob, mode != "none")
                         if fallback[0] is None or score > fallback[0][0]:
@@ -413,7 +421,7 @@ def main() -> int:
                 pl = SimpleNamespace(ok=True, q=np.asarray(variant["observe_q"], float), desc=variant.get("observe_desc", "") + " (the program's)")
             else:
                 r0 = grasp_plan(prog, args.cell, cfg, grid, disc, None, planted, world_disc, check_pieces,
-                                dict(soil_info(grid, args.cell, None, prog.tray_top), pitch_deg=float(variant.get("pitch_deg", 0.0))),
+                                dict(soil_of(grid, args.cell, None, prog.tray_top), pitch_deg=float(variant.get("pitch_deg", 0.0))),
                                 args, variant=variant,
                                 stems=[k for k in occupied if k != args.cell])
                 q_near = np.array(r0["q"]["stage"]) if isinstance(r0, dict) else np.array(cfg["tray"]["overview_q"], float)
@@ -436,7 +444,7 @@ def main() -> int:
         obs_file = OUT / f"{args.cell}_observe.json"
         from seedling.grasp import load_observation
 
-        obs = load_observation(obs_file, grid, args.cell) if not args.from_observe else None
+        obs = load_observation(obs_file, grid, args.cell) if not args.from_observe and closeup else None
         if obs is not None:
             # the cell where the close-up put it (grasp.closeup_xy: apply), else the overview's: grid is the program's
             # (prog.grid), so the template is moved there and the hand's way in is checked from there
@@ -444,7 +452,7 @@ def main() -> int:
             grid["cells"][args.cell] = [round(float(c_[0]), 4), round(float(c_[1]), 4), grid["cells"][args.cell][2]]
         # the hand pitched as the program found it (a plant found only pitched, checked flat when the run chose it, was
         # refused there: 2026-11-10, a full tray in real time, 29 of 72); grasp_for_place below tries flat and pitched
-        si = dict(soil_info(grid, args.cell, obs, prog.tray_top), pitch_deg=float(variant.get("pitch_deg", 0.0)))
+        si = dict(soil_of(grid, args.cell, obs, prog.tray_top), pitch_deg=float(variant.get("pitch_deg", 0.0)))
         if obs is not None:
             obs["soil_used"] = si["soil"]
             obs_file.write_text(json.dumps(obs, indent=1))

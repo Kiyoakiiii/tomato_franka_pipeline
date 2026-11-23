@@ -38,8 +38,9 @@ def main() -> int:
     ap.add_argument("--no-locate", action="store_true",
                     help="do not locate again: take the tray and the disc as the last locate left them (checked on its overlay "
                          "picture; the files keep track of the plants taken and the holes filled since)")
-    ap.add_argument("--subprocess", action="store_true", help="every step in a process of its own (as before 2026-11-10; "
-                    "default: the arm's steps in this process, the robot connected once)")
+    ap.add_argument("--inproc", action="store_true", help="the arm's steps in this process, the robot connected once (default "
+                    "2026-11-10..18; 2026-11-18: twice a reflex, communication_constraints_violation, on the first move of a cycle while "
+                    "the next plant was planned in this process; none with every step in a process of its own, ~0.3 s a step)")
     args = ap.parse_args()
     cfg = config_from_args(args)
     py = sys.executable
@@ -51,7 +52,7 @@ def main() -> int:
     def run(cmd, quiet=False, env=None):
         """a step: (exit code, its output if quiet). The arm's steps (env None) in this process (seedling.inproc: loaded
         and connected once); the planning ones (env: a planning-only robot, run in parallel) in their own processes"""
-        if env is None and not args.subprocess:
+        if env is None and args.inproc:
             from seedling.inproc import run_script
 
             argv = list(cmd[1:]) + (["--inproc"] if cmd[0] == "scripts/cycle.py" else [])

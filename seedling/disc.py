@@ -42,8 +42,84 @@ def _fit_circle(xy: np.ndarray):
     return c[:2], r, res
 
 
-def _from_outer_rim(frame, T_BC, XYZ, hsv, red, ok, z_top, g, prior, n_good) -> dict:
-    """centre from the outer rim, turn from the top face, free holes from the red inside (see the module notes)"""
+def _free_by_inside(XYZ, ok, H, z_top, red_frac, min_red: float = 0.9, r: float = 0.020, min_points: int = 30) -> list[bool]:
+    """per hole: free by its inside, without a clean rim seen: mostly red inside (>= min_red) and no plant above it
+    (fewer than min_points 3D points within r of its centre, 15-250 mm over the top). 2026-11-17, from 20 earlier
+    pictures with planted holes: a plug's hole shows 0.47-0.56 red, and two planted holes 1.0 (their plants seen above)"""
+    P = XYZ[ok]
+    out = []
+    for hc, rf in zip(H, red_frac):
+        m = (np.hypot(P[:, 0] - hc[0], P[:, 1] - hc[1]) < r) & (P[:, 2] > z_top + 0.015) & (P[:, 2] < z_top + 0.25)
+        out.append(rf >= min_red and int(m.sum()) < min_points)
+    return out
+
+
+def _red_fractions(frame, T_BC, red, H, z_top) -> list[float]:
+    """share of red pixels inside an 18 mm circle around each hole centre on the top plane (a free hole shows its red
+    inside; a plug in it soil and leaves)"""
+    K, T_CB = frame.intr.K(), np.linalg.inv(T_BC)
+    out = []
+    for hc in H:
+        ring = np.array([[hc[0] + 0.018 * np.cos(t), hc[1] + 0.018 * np.sin(t), z_top] for t in np.linspace(0, 2 * np.pi, 40)])
+        pc = apply_T(T_CB, ring)
+        px = (K @ (pc / pc[:, 2:3]).T).T[:, :2].astype(np.int32)
+        mm = np.zeros(red.shape, np.uint8)
+        cv2.fillPoly(mm, [px], 1)
+        out.append(float(red[mm > 0].mean()) if mm.any() else 0.0)
+    return out
+
+
+def _turn_from_shading(frame, T_BC, c, r_h, z_top, g, step_deg: float = 0.25):
+    """the disc's turn from the picture's brightness: the six hole circles at the turn where the top face around them is
+    brightest compared with their insides (lit from above, the holes are shaded; a plug in one is dark soil). Independent
+    of the colours (2026-11-17: after a restart, at dusk, the top face came out as red as the holes, S 166 instead of
+    114, and neither the hole blobs nor the top-face depth gave the turn; the shading did: top 166 vs holes 81 gray,
+    against 20 at the wrong turn). Mean gray inside 24 mm of each hole centre (nearly the whole 24.75 mm hole) against
+    the top face 1 mm beyond the rims: within 0.5 deg of the turn the hole rims gave on four pictures (the medians inside
+    18 mm: up to 4 deg off). (turn deg, contrast, contrast 30 deg off it) or None"""
+    gray = cv2.cvtColor(frame.rgb, cv2.COLOR_RGB2GRAY).astype(float)
+    K, T_CB = frame.intr.K(), np.linalg.inv(T_BC)
+    rim = np.array([[c[0] + (g["outer_d"] / 2) * np.cos(a), c[1] + (g["outer_d"] / 2) * np.sin(a), z_top]
+                    for a in np.linspace(0, 2 * np.pi, 72, endpoint=False)])
+    pc = apply_T(T_CB, rim)
+    if (pc[:, 2] <= 0).any():
+        return None
+    px = (K @ (pc / pc[:, 2:3]).T).T[:, :2]
+    h_, w_ = gray.shape
+    u0, v0 = np.clip(np.floor(px.min(0)).astype(int), 0, [w_ - 1, h_ - 1])
+    u1, v1 = np.clip(np.ceil(px.max(0)).astype(int), 0, [w_ - 1, h_ - 1])
+    if u1 <= u0 or v1 <= v0:
+        return None
+    uu, vv = np.meshgrid(np.arange(u0, u1 + 1), np.arange(v0, v1 + 1))
+    uv = np.column_stack([uu.ravel(), vv.ravel()]).astype(float)
+    xy = _ray_plane(frame, T_BC, uv, z_top)[:, :2]
+    rr = np.hypot(*(xy - c).T)
+    sel = rr < g["outer_d"] / 2 - 0.004
+    if sel.sum() < 500:
+        return None
+    xy, gv = xy[sel], gray[uv[sel, 1].astype(int), uv[sel, 0].astype(int)]
+    ang = np.arctan2(xy[:, 1] - c[1], xy[:, 0] - c[0])
+    rad = np.hypot(*(xy - c).T)
+
+    def contrast(ph):
+        # distance to the nearest hole centre at this turn, from the polar coordinates (law of cosines)
+        da = (ang - np.radians(ph) + np.pi / 6) % (np.pi / 3) - np.pi / 6
+        d = np.sqrt(np.maximum(rad ** 2 + r_h ** 2 - 2 * rad * r_h * np.cos(da), 0.0))
+        ins, top = d < 0.024, d > g["hole_d"] / 2 + 0.001
+        if ins.sum() < 100 or top.sum() < 100:
+            return -np.inf
+        return float(np.mean(gv[top]) - np.mean(gv[ins]))
+
+    phs = np.arange(-30.0, 30.0, step_deg)
+    cs = np.array([contrast(ph) for ph in phs])
+    i = int(np.argmax(cs))
+    off = contrast(phs[i] + 30.0)
+    return float(phs[i]), float(cs[i]), float(off)
+
+
+def _from_outer_rim(frame, T_BC, XYZ, hsv, red, ok, z_top, g, prior, n_good, clean=()) -> dict:
+    """centre from the outer rim; turn from the clean hole rims seen (clean: their centres), else from the top face;
+    free holes from the red inside (see the module notes)"""
     col = ((hsv[..., 0] < 25) | (hsv[..., 0] > 165)) & (hsv[..., 1] > 50)
     with np.errstate(invalid="ignore"):
         top = ok & col & (np.abs(XYZ[..., 2] - z_top) < 0.006)
@@ -78,40 +154,64 @@ def _from_outer_rim(frame, T_BC, XYZ, hsv, red, ok, z_top, g, prior, n_good) -> 
     if inl.mean() < 0.2 or rms > 0.002 or cover < 180:
         return {"ok": False, "status": f"{n_good} clean hole rims; outer rim: {inl.mean() * 100:.0f}% of the outline on a "
                 f"{R0 * 2000:.0f} mm circle over {cover} deg, rms {rms * 1000:.1f} mm (disc not in full view?)"}
-    # turn: the six hole circles at the phase that leaves the fewest top-face points inside them
+    r_h = float(prior.get("hole_circle_r_mm", g["hole_r"] * 1000)) / 1000
+    # turn from the clean hole rims that lie on the hole circle around this centre (2026-11-17: from the overview the
+    # camera's depth fills the 55 mm deep holes up to the top face (z median 0.057-0.063 inside all six), so the top
+    # face test below found no turn in 2 of 4 pictures although 2 clean rims were seen; the rims give it directly)
+    on = [h for h in clean if abs(np.hypot(*(np.asarray(h) - c)) - r_h) < 0.004]
+    if on:
+        ah = np.array([np.arctan2(h[1] - c[1], h[0] - c[0]) for h in on])
+        phi = float(np.degrees(np.angle(np.mean(np.exp(6j * ah)))) / 6)  # -30..30 deg, as from the hole rims in locate_disc
+        frac, how = None, f"turn {{:.1f}} deg from {len(on)} clean hole rims"
+    else:
+        phi, frac, how = None, None, None
+    # else: the six hole circles at the phase that leaves the fewest top-face points inside them
     P = XYZ[ok]
     P = P[(np.hypot(P[:, 0] - c[0], P[:, 1] - c[1]) < g["outer_d"] / 2 - 0.003) & (np.abs(P[:, 2] - z_top) < 0.003)]
-    r_h = float(prior.get("hole_circle_r_mm", g["hole_r"] * 1000)) / 1000
-    scores = []
-    for phi in np.arange(0.0, 60.0, 0.5):
-        a = np.radians(phi + 60.0 * np.arange(6))
-        H = c + r_h * np.column_stack([np.cos(a), np.sin(a)])
-        d = np.min(np.hypot(P[:, 0, None] - H[None, :, 0], P[:, 1, None] - H[None, :, 1]), axis=1)
-        scores.append((float(np.mean(d < g["hole_d"] / 2 - 0.004)), phi))
-    frac, phi = min(scores)
-    if frac > 0.3:
-        return {"ok": False, "status": f"{n_good} clean hole rims; no turn of the disc leaves its holes clear of the top face"}
+    if phi is None:
+        sh = _turn_from_shading(frame, T_BC, c, r_h, z_top, g)
+        if sh is not None and sh[1] >= 40.0 and sh[1] - sh[2] >= 25.0:
+            phi, how = sh[0], f"turn {{:.1f}} deg from the shading (top face {sh[1]:.0f} gray brighter than the holes, {sh[2]:.0f} at 30 deg off)"
+    if phi is None and not prior:
+        return {"ok": False, "status": f"{n_good} clean hole rims on the hole circle, no clear shading and no earlier disc: the turn is unknown"}
+    if phi is None:
+        scores = []
+        for ph in np.arange(0.0, 60.0, 0.5):
+            a = np.radians(ph + 60.0 * np.arange(6))
+            H = c + r_h * np.column_stack([np.cos(a), np.sin(a)])
+            d = np.min(np.hypot(P[:, 0, None] - H[None, :, 0], P[:, 1, None] - H[None, :, 1]), axis=1)
+            scores.append((float(np.mean(d < g["hole_d"] / 2 - 0.004)), ph))
+        frac, phi = min(scores)
+        if frac > 0.3:
+            return {"ok": False, "status": f"{n_good} clean hole rims; no turn of the disc leaves its holes clear of the top face"}
+        how = f"top face (turn {{:.1f}} deg, {frac * 100:.0f}% top points in the holes)"
     # numbering kept: the same hole keeps its number when the disc is turned by less than 30 deg
     p0 = float(prior.get("phase_deg", phi))
     phi = p0 + ((phi - p0 + 30) % 60 - 30)
     a = np.radians(phi + 60.0 * np.arange(6))
     H = c + r_h * np.column_stack([np.cos(a), np.sin(a)])
-    K, T_CB = frame.intr.K(), np.linalg.inv(T_BC)
-    red_frac = []
-    for hc in H:
-        ring = np.array([[hc[0] + 0.018 * np.cos(t), hc[1] + 0.018 * np.sin(t), z_top] for t in np.linspace(0, 2 * np.pi, 40)])
-        pc = apply_T(T_CB, ring)
-        px = (K @ (pc / pc[:, 2:3]).T).T[:, :2].astype(np.int32)
-        mm = np.zeros(red.shape, np.uint8)
-        cv2.fillPoly(mm, [px], 1)
-        red_frac.append(float(red[mm > 0].mean()) if mm.any() else 0.0)
-    free = [i + 1 for i, f_ in enumerate(red_frac) if f_ > 0.5]
-    return {"ok": True, "status": f"outer rim ({inl.mean() * 100:.0f}% of the outline over {cover} deg, rms {rms * 1000:.1f} mm) and top face (turn {phi:.1f} deg, "
-            f"{frac * 100:.0f}% top points in the holes); {n_good} clean hole rims", "centre": [float(c[0]), float(c[1])],
+    red_frac = _red_fractions(frame, T_BC, red, H, z_top)
+    by_in = _free_by_inside(XYZ, ok, H, z_top, red_frac)
+    free = [i + 1 for i, hc in enumerate(H) if by_in[i] or any(np.hypot(*(np.asarray(h) - hc)) < 0.010 for h in clean)]
+    return {"ok": True, "status": f"outer rim ({inl.mean() * 100:.0f}% of the outline over {cover} deg, rms {rms * 1000:.1f} mm) and "
+            + how.format(phi) + f"; {n_good} clean hole rims", "centre": [float(c[0]), float(c[1])],
             "z_top": round(z_top, 4), "z_top_depth": round(z_top, 4), "free_holes": free, "phase_deg": round(float(phi), 1),
             "hole_circle_r_mm": round(r_h * 1000, 1), "holes_seen": [], "hole_radius_mm": [], "rim_rms_mm": [],
             "red_fraction": [round(v, 2) for v in red_frac], "holes": H.tolist(), "hole_bottom_z": round(z_top - g["hole_depth"], 4),
             "from_outer_rim": True}
+
+
+def _top_z_by_colour(XYZ, ok, hsv, inarea) -> float | None:
+    """the disc top's height without hole blobs: the most common height of the disc-coloured (red-orange) points in the
+    work area above the table (the flat top face outnumbers the side wall at any one height)"""
+    col = ((hsv[..., 0] < 25) | (hsv[..., 0] > 165)) & (hsv[..., 1] > 50)
+    with np.errstate(invalid="ignore"):
+        z = XYZ[ok & inarea & col & (XYZ[..., 2] > 0.015), 2]
+    if len(z) < 2000:
+        return None
+    h, e = np.histogram(z, bins=np.arange(float(z.min()), float(z.max()) + 0.004, 0.002))
+    z_pk = e[int(np.argmax(np.convolve(h, [1, 2, 1], "same")))] + 0.001
+    return float(np.median(z[np.abs(z - z_pk) < 0.004]))
 
 
 def locate_disc(frame: Frame, T_BC: np.ndarray, area=(0.30, 0.95, -0.50, 0.50), max_top_z: float = 0.45, geom: dict | None = None,
@@ -151,9 +251,18 @@ def locate_disc(frame: Frame, T_BC: np.ndarray, area=(0.30, 0.95, -0.50, 0.50), 
             # in the area, or no depth at all to tell (checked below by the fit)
             if sel.sum() >= 0.2 * a or not ((lab == k) & ok).any():
                 blobs.append(k)
+    def rim_route(n_good, clean, z_seen=None, why=""):
+        """the outer rim and the turn from the clean rims / shading (_from_outer_rim): when the holes alone do not do"""
+        z_ = float(prior["z_top"]) if prior else (z_seen if z_seen is not None else _top_z_by_colour(XYZ, ok, hsv, inarea))
+        if z_ is None:
+            return {"ok": False, "status": why + "; no disc top face height"}
+        d_ = _from_outer_rim(frame, T_BC, XYZ, hsv, red, ok, z_, g, prior or {}, n_good, clean=clean)
+        if not d_.get("ok") and why:
+            d_["status"] = why + "; " + d_["status"]
+        return d_
+
     if len(blobs) < (1 if prior else 3):
-        return {"ok": False, "status": f"only {len(blobs)} red hole-like blobs in the work area"
-                + (" (disc full, or not in view)" if prior else "")}
+        return rim_route(0, [], why=f"only {len(blobs)} red hole-like blobs in the work area")
     # top plane: dense depth on the (non-red) top face in a band around the blobs
     allb = np.isin(lab, blobs).astype(np.uint8)
     band = cv2.dilate(allb, np.ones((15, 15), np.uint8)) & ~cv2.dilate(allb, np.ones((5, 5), np.uint8)).astype(bool)
@@ -166,7 +275,7 @@ def locate_disc(frame: Frame, T_BC: np.ndarray, area=(0.30, 0.95, -0.50, 0.50), 
     elif prior:
         z_top = float(prior["z_top"])
     else:
-        return {"ok": False, "status": "no depth on the disc top face"}
+        return rim_route(0, [], why="no depth on the top face around the hole blobs")
     outlines = []
     for k in blobs:
         grown = cv2.dilate((lab == k).astype(np.uint8), np.ones((5, 5), np.uint8)) & m0
@@ -188,8 +297,18 @@ def locate_disc(frame: Frame, T_BC: np.ndarray, area=(0.30, 0.95, -0.50, 0.50), 
     z_depth = z_top
     holes = fit_all(z_top)
     good = [hh for hh in holes if abs(hh["r"] - rh) < 0.005 and hh["rms_mm"] < 3.0]
-    if len(good) < 3 and prior:
-        return _from_outer_rim(frame, T_BC, XYZ, hsv, red, ok, float(prior["z_top"]), g, prior, len(good))
+    if len(good) >= 2:
+        # holes of one disc lie within a hole-circle diameter of each other: keep the largest such group (2026-11-17: a
+        # red blob 0.30 m away fit a 22.5 mm circle, rms 2.6 mm, and spoilt the disc with two real holes seen)
+        C0 = np.array([hh["centre"] for hh in good])
+        near = np.hypot(*(C0[:, None, :] - C0[None, :, :]).transpose(2, 0, 1)) <= 2 * g["hole_r"] + 0.008
+        best = max(range(len(good)), key=lambda i: near[i].sum())
+        good = [hh for i, hh in enumerate(good) if near[best, i]]
+    if len(good) < 3:
+        # the outer rim, the turn from the clean rims seen or the shading (2026-11-17: from the overview 2 of 4 pictures of
+        # a new, empty disc had 2 clean rims, the near holes' insides running into the red side wall; after a restart
+        # none, the top face as red as the holes)
+        return rim_route(len(good), [hh["centre"] for hh in good], z_seen=z_top)
     if len(good) < 3:
         return {"ok": False, "status": f"{len(good)} hole rims fit a {g['hole_d'] * 1000:.1f} mm circle (radii mm: "
                 f"{[round(hh['r'] * 1000, 1) for hh in holes]})", "z_top": z_top}
@@ -223,14 +342,18 @@ def locate_disc(frame: Frame, T_BC: np.ndarray, area=(0.30, 0.95, -0.50, 0.50), 
     # all six hole centres from the fitted centre and phase (the ones not seen included)
     all_h = [[float(c[0] + r_holes * np.cos(np.radians(phase + 60 * i))), float(c[1] + r_holes * np.sin(np.radians(phase + 60 * i)))]
              for i in range(g["n_holes"])]
-    # a hole is free when its red interior was seen (a plug in it shows soil and leaves instead)
-    free = [i + 1 for i, h in enumerate(all_h) if np.hypot(*(C - np.array(h)).T).min() < 0.010]
+    # a hole is free when its red interior was seen (a plug in it shows soil and leaves instead): a clean rim, or mostly
+    # red inside (2026-11-17: from the overview the near holes' insides run into the red side wall in the picture, no
+    # clean rim; 3 of 6 empty holes were left unknown and not placed into; see _free_by_inside)
+    red_frac = _red_fractions(frame, T_BC, red, np.array(all_h), z_top)
+    by_in = _free_by_inside(XYZ, ok, np.array(all_h), z_top, red_frac)
+    free = [i + 1 for i, h in enumerate(all_h) if np.hypot(*(C - np.array(h)).T).min() < 0.010 or by_in[i]]
     return {"ok": okk, "status": status, "centre": [float(c[0]), float(c[1])], "z_top": round(z_top, 4), "z_top_depth": round(z_depth, 4),
             "free_holes": free,
             "phase_deg": round(float(phase), 1), "hole_circle_r_mm": round(float(r_holes) * 1000, 1), "holes_seen": [[round(float(v), 4) for v in hh["centre"]] for hh in good],
             "hole_radius_mm": [round(hh["r"] * 1000, 1) for hh in good], "rim_rms_mm": [round(hh["rms_mm"], 1) for hh in good],
             "centre_residual_mm": [round(float(v) * 1000, 1) for v in rsd], "spacing_residual_deg": [round(float(v), 1) for v in dphase],
-            "holes": all_h, "hole_bottom_z": round(z_top - g["hole_depth"], 4)}
+            "holes": all_h, "hole_bottom_z": round(z_top - g["hole_depth"], 4), "red_fraction": [round(v, 2) for v in red_frac]}
 
 
 def taken_holes(disc: dict) -> list[int]:

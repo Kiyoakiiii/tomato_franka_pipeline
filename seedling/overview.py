@@ -74,8 +74,9 @@ def tray_contents(frame: Frame, T_BC: np.ndarray, cfg: dict, g: TrayGrid, log=pr
     """for a located tray: the cells with a plug, each plug's soil height, the cells with a plant over them"""
     if not g.ok:
         return {"occupied": [], "planted": [], "green": [], "soil_z_overview": {}}
-    occ = occupied_cells(frame, T_BC, g.cells, g.z_top, cfg)
-    log(f"{len(occ)} cells with a plug: {sorted(occ)}")
+    hidden = []
+    occ = occupied_cells(frame, T_BC, g.cells, g.z_top, cfg, hidden=hidden)
+    log(f"{len(occ)} cells with a plug: {sorted(occ)}" + (f" (not judged, under leaves: {sorted(hidden)})" if hidden else ""))
     from .plugsense import measure_plug
 
     soil = {}
